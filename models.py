@@ -1,6 +1,7 @@
 """数据库模型"""
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 from sqlalchemy import (
     Boolean, Column, DateTime, Enum as SAEnum, Float,
@@ -79,7 +80,7 @@ class Department(Base):
     enterprise = relationship("Enterprise", back_populates="departments")
     parent = relationship("Department", remote_side=[id], back_populates="children")
     children = relationship("Department", back_populates="parent")
-    users = relationship("User", back_populates="department")
+    users = relationship("User", back_populates="department", foreign_keys="User.department_id")
 
 
 class User(Base):
@@ -98,7 +99,7 @@ class User(Base):
     last_login = Column(DateTime)
 
     enterprise = relationship("Enterprise", back_populates="users")
-    department = relationship("Department", back_populates="users")
+    department = relationship("Department", back_populates="users", foreign_keys=[department_id])
     documents = relationship("Document", back_populates="uploader")
     knowledge_bases = relationship("UserKnowledgeBase", back_populates="user")
     token_usage = relationship("TokenUsage", back_populates="user")

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import FastAPI, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -82,21 +82,8 @@ text_chunker = TextChunker()
 
 
 # ============= 依赖 =============
-async def get_current_token():
-    """获取当前用户 Token（从 Header）"""
-    from fastapi import Request
-
-    async def _get_token(request: Request) -> Optional[str]:
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            return auth[7:]
-        return None
-
-    return _get_token
-
-
 async def get_current_user_dep(
-    request,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> User:
     """获取当前登录用户"""
