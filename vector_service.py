@@ -33,7 +33,7 @@ class EmbeddingService:
                 settings.EMBEDDING_MODEL,
                 device=settings.EMBEDDING_DEVICE,
             )
-            self.dimension = self.model.get_sentence_embedding_dimension()
+            self.dimension = self.model.get_embedding_dimension()
 
     def encode(self, texts) -> np.ndarray:
         """文本向量化"""
@@ -63,10 +63,8 @@ class VectorStore:
             if settings.QDRANT_IN_MEMORY:
                 self.client = QdrantClient(":memory:")
             else:
-                self.client = QdrantClient(
-                    host=settings.QDRANT_HOST,
-                    port=settings.QDRANT_PORT,
-                )
+                qdrant_path = getattr(settings, 'QDRANT_PATH', './qdrant_data')
+                self.client = QdrantClient(path=qdrant_path)
         self._ensure_collection()
 
     def _ensure_collection(self):
@@ -98,7 +96,7 @@ class VectorStore:
         points = []
 
         for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            vector_id = f"{doc_id}_{i}"
+            vector_id = str(uuid.uuid4())
             vector_ids.append(vector_id)
 
             point = models.PointStruct(
@@ -145,12 +143,14 @@ class VectorStore:
                 ]
             )
 
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector.tolist(),
+            query=query_vector.tolist(),
             query_filter=filter_conditions,
             limit=top_k,
             score_threshold=score_threshold,
+            with_payload=True,
+            with_vectors=False,
         )
 
         return [
@@ -162,25 +162,38 @@ class VectorStore:
                 "chunk_index": hit.payload.get("chunk_index", 0),
                 "metadata": hit.payload.get("metadata", {}),
             }
-            for hit in results
+            for hit in results.points
         ]
 
     def delete_by_doc_id(self, doc_id: str):
         """删除文档的所有向量"""
         self.connect()
-        self.client.delete(
-            collection_name=self.collection_name,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="doc_id",
-                            match=models.MatchValue(value=doc_id),
-                        )
-                    ]
+
+        # 先查询匹配的所有点 ID
+        filter_conditions = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="doc_id",
+                    match=models.MatchValue(value=doc_id),
                 )
-            ),
+            ]
         )
+
+        results = self.client.query_points(
+            collection_name=self.collection_name,
+            query=[0.0] * settings.EMBEDDING_DIM,  # 虚拟向量，仅用于过滤
+            query_filter=filter_conditions,
+            limit=10000,
+            with_payload=False,
+            with_vectors=False,
+        )
+
+        if results.points:
+            point_ids = [p.id for p in results.points]
+            self.client.delete_points(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(points=point_ids),
+            )
 
     def delete_collection(self):
         """删除整个 Collection"""

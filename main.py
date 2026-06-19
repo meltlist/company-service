@@ -1,5 +1,9 @@
 """FastAPI 主应用"""
 import os
+# 设置 HuggingFace 镜像（必须在导入 sentence-transformers 之前）
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 import uuid
 from datetime import datetime
 from pathlib import Path

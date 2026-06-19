@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
     QDRANT_COLLECTION: str = "rag_knowledge_base"
-    QDRANT_IN_MEMORY: bool = True
+    QDRANT_IN_MEMORY: bool = False
+    QDRANT_PATH: str = "./qdrant_data"
 
     # Embedding
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
