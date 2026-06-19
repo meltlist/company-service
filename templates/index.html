@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>企业 RAG 知识库</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .chat-container { height: calc(100vh - 200px); }
+        .message-content { white-space: pre-wrap; word-break: break-word; }
+        .source-card { transition: all 0.2s; }
+        .source-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .typing-indicator span { animation: bounce 1.4s infinite; display: inline-block; width: 8px; height: 8px; background: #666; border-radius: 50%; margin: 0 2px; }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-8px); } }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="app">
+        <!-- 顶部导航 -->
+        <nav class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <h1 class="text-xl font-bold text-gray-800">📚 企业 RAG 知识库</h1>
+                    <span id="userInfo" class="text-sm text-gray-500"></span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="showUploadModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
+                        上传文档
+                    </button>
+                    <button onclick="showSettingsModal()" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm">
+                        企业设置
+                    </button>
+                    <button onclick="logout()" class="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm">
+                        退出
+                    </button>
+                </div>
+            </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <div class="max-w-7xl mx-auto px-4 py-6">
+            <div class="grid grid-cols-12 gap-6">
+                <!-- 左侧：文档和知识库列表 -->
+                <div class="col-span-3">
+                    <!-- 知识库列表 -->
+                    <div class="bg-white rounded-xl shadow-sm p-4 mb-4">
+                        <h2 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                            <span>📁</span> 知识库
+                        </h2>
+                        <div id="kbList" class="space-y-2"></div>
+                        <button onclick="showCreateKBSubModal()" class="w-full mt-3 px-3 py-2 border border-dashed border-gray-300 rounded-lg text-sm text-gray-500 hover:border-blue-400 hover:text-blue-500">
+                            + 新建知识库
+                        </button>
+                    </div>
+
+                    <!-- 文档列表 -->
+                    <div class="bg-white rounded-xl shadow-sm p-4">
+                        <h2 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                            <span>📄</span> 我的文档
+                        </h2>
+                        <div id="docList" class="space-y-2 max-h-96 overflow-y-auto"></div>
+                        <button onclick="showUploadModal()" class="w-full mt-3 px-3 py-2 bg-gray-50 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+                            上传文档
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 右侧：问答区域 -->
+                <div class="col-span-9">
+                    <div class="bg-white rounded-xl shadow-sm flex flex-col" style="height: calc(100vh - 120px);">
+                        <!-- 知识库选择 -->
+                        <div class="border-b p-4">
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-600">问答范围：</label>
+                                <div id="kbSelector" class="flex flex-wrap gap-2"></div>
+                            </div>
+                        </div>
+
+                        <!-- 聊天区域 -->
+                        <div id="chatContainer" class="flex-1 overflow-y-auto p-4 space-y-4">
+                            <div class="text-center text-gray-400 py-12">
+                                <div class="text-4xl mb-3">🤖</div>
+                                <p>你好！我是智能问答助手</p>
+                                <p class="text-sm mt-1">请先上传文档，然后选择知识库开始提问</p>
+                            </div>
+                        </div>
+
+                        <!-- 输入区域 -->
+                        <div class="border-t p-4">
+                            <div class="flex gap-3">
+                                <textarea
+                                    id="queryInput"
+                                    placeholder="输入问题... (Ctrl+Enter 发送)"
+                                    rows="2"
+                                    class="flex-1 px-4 py-3 border border-gray-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    onkeydown="handleKeyDown(event)"
+                                ></textarea>
+                                <button
+                                    onclick="sendQuery()"
+                                    id="sendBtn"
+                                    class="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-medium self-end"
+                                >
+                                    发送
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 上传弹窗 -->
+    <div id="uploadModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-2xl w-full max-w-lg p-6 m-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold">上传文档</h3>
+                <button onclick="closeUploadModal()" class="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <form id="uploadForm" onsubmit="handleUpload(event)">
+                <div class="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center mb-4 hover:border-blue-400 transition-colors">
+                    <input type="file" id="fileInput" accept=".pdf,.docx,.xlsx,.xls" class="hidden" onchange="handleFileSelect(event)">
+                    <label for="fileInput" class="cursor-pointer">
+                        <div id="fileName" class="text-gray-600">点击选择文件或拖拽到此处</div>
+                        <div class="text-sm text-gray-400 mt-2">支持 PDF、Word、Excel (最大 50MB)</div>
+                    </label>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-600 mb-1">文档标题</label>
+                    <input type="text" id="docTitle" class="w-full px-3 py-2 border rounded-lg" placeholder="留空则使用文件名">
+                </div>
+                <div class="flex justify-end gap-3">
+                    <button type="button" onclick="closeUploadModal()" class="px-4 py-2 text-gray-600">取消</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg">上传</button>
+                </div>
+            </form>
+            <div id="uploadProgress" class="hidden mt-4">
+                <div class="text-sm text-gray-600 mb-2">上传中...</div>
+                <div class="h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div id="progressBar" class="h-full bg-blue-600 transition-all" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div id="settingsModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-2xl w-full max-w-lg p-6 m-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold">企业设置</h3>
+                <button onclick="closeSettingsModal()" class="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <div id="settingsContent">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-1">DeepSeek API Key</label>
+                        <input type="password" id="deepseekKey" class="w-full px-3 py-2 border rounded-lg" placeholder="sk-...">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-1">Gemini API Key</label>
+                        <input type="password" id="geminiKey" class="w-full px-3 py-2 border rounded-lg" placeholder="AIza...">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-1">默认模型</label>
+                        <select id="defaultModel" class="w-full px-3 py-2 border rounded-lg">
+                            <option value="deepseek-chat">DeepSeek Chat</option>
+                            <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-3 mt-6">
+                    <button onclick="closeSettingsModal()" class="px-4 py-2 text-gray-600">取消</button>
+                    <button onclick="saveSettings()" class="px-4 py-2 bg-blue-600 text-white rounded-lg">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新建知识库弹窗 -->
+    <div id="createKBSubModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-2xl w-full max-w-md p-6 m-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold">新建知识库</h3>
+                <button onclick="closeCreateKBSubModal()" class="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <form onsubmit="handleCreateKB(event)">
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-600 mb-1">知识库名称</label>
+                    <input type="text" id="kbName" class="w-full px-3 py-2 border rounded-lg" required>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-600 mb-1">描述</label>
+                    <textarea id="kbDesc" rows="2" class="w-full px-3 py-2 border rounded-lg"></textarea>
+                </div>
+                <div class="mb-4">
+                    <label class="flex items-center gap-2">
+                        <input type="checkbox" id="kbPublic" class="w-4 h-4">
+                        <span class="text-sm text-gray-600">对上级可见</span>
+                    </label>
+                </div>
+                <div class="flex justify-end gap-3">
+                    <button type="button" onclick="closeCreateKBSubModal()" class="px-4 py-2 text-gray-600">取消</button>
+                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg">创建</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+        let token = localStorage.getItem('token');
+        let currentUser = null;
+        let knowledgeBases = [];
+        let documents = [];
+        let selectedKBs = [];
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (!token) {
+                window.location.href = '/login';
+                return;
+            }
+            await loadUserInfo();
+            await loadKnowledgeBases();
+            await loadDocuments();
+        });
+
+        // API 请求
+        async function api(endpoint, options = {}) {
+            const response = await fetch(`${API_BASE}${endpoint}`, {
+                ...options,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    ...options.headers,
+                },
+            });
+            if (response.status === 401) {
+                logout();
+                throw new Error('登录已过期');
+            }
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || '请求失败');
+            return data;
+        }
+
+        // 加载用户信息
+        async function loadUserInfo() {
+            try {
+                currentUser = await api('/auth/me');
+                document.getElementById('userInfo').textContent = `${currentUser.full_name} (${currentUser.role === 'enterprise_admin' ? '管理员' : '成员'})`;
+            } catch (e) {
+                logout();
+            }
+        }
+
+        // 加载知识库
+        async function loadKnowledgeBases() {
+            try {
+                knowledgeBases = await api('/knowledge-bases');
+                renderKBList();
+                renderKBSelector();
+            } catch (e) {
+                console.error('加载知识库失败:', e);
+            }
+        }
+
+        // 加载文档
+        async function loadDocuments() {
+            try {
+                documents = await api('/documents');
+                renderDocList();
+            } catch (e) {
+                console.error('加载文档失败:', e);
+            }
+        }
+
+        // 渲染知识库列表
+        function renderKBList() {
+            const container = document.getElementById('kbList');
+            if (knowledgeBases.length === 0) {
+                container.innerHTML = '<div class="text-sm text-gray-400">暂无知识库</div>';
+                return;
+            }
+            container.innerHTML = knowledgeBases.map(kb => `
+                <div class="p-2 rounded-lg hover:bg-gray-50 cursor-pointer flex items-center gap-2" onclick="toggleKBSelection('${kb.id}')">
+                    <input type="checkbox" ${selectedKBs.includes(kb.id) ? 'checked' : ''} class="w-4 h-4">
+                    <span class="text-sm">${kb.name}</span>
+                    <span class="text-xs text-gray-400 ml-auto">${kb.doc_count}文档</span>
+                </div>
+            `).join('');
+        }
+
+        // 渲染知识库选择器
+        function renderKBSelector() {
+            const container = document.getElementById('kbSelector');
+            container.innerHTML = knowledgeBases.map(kb => `
+                <label class="px-3 py-1 rounded-full text-sm cursor-pointer transition-colors ${selectedKBs.includes(kb.id) ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}">
+                    <input type="checkbox" value="${kb.id}" ${selectedKBs.includes(kb.id) ? 'checked' : ''} class="hidden" onchange="toggleKBSelection('${kb.id}')">
+                    ${kb.name}
+                </label>
+            `).join('');
+        }
+
+        // 切换知识库选择
+        function toggleKBSelection(kbId) {
+            const idx = selectedKBs.indexOf(kbId);
+            if (idx === -1) {
+                selectedKBs.push(kbId);
+            } else {
+                selectedKBs.splice(idx, 1);
+            }
+            renderKBList();
+            renderKBSelector();
+        }
+
+        // 渲染文档列表
+        function renderDocList() {
+            const container = document.getElementById('docList');
+            if (documents.length === 0) {
+                container.innerHTML = '<div class="text-sm text-gray-400">暂无文档</div>';
+                return;
+            }
+            container.innerHTML = documents.map(doc => `
+                <div class="p-2 rounded-lg hover:bg-gray-50 flex items-center justify-between">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm font-medium truncate">${doc.title}</div>
+                        <div class="text-xs text-gray-400">${formatFileSize(doc.file_size)}</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        ${doc.status === 'pending' ? '<span class="text-xs px-2 py-1 bg-yellow-100 text-yellow-700 rounded">待处理</span>' : ''}
+                        ${doc.status === 'processing' ? '<span class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">处理中</span>' : ''}
+                        ${doc.status === 'ready' ? '<span class="text-xs px-2 py-1 bg-green-100 text-green-700 rounded">就绪</span>' : ''}
+                        ${doc.status === 'failed' ? '<span class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded">失败</span>' : ''}
+                        ${doc.status === 'pending' ? `<button onclick="processDoc('${doc.id}')" class="text-xs text-blue-600 hover:underline">处理</button>` : ''}
+                        ${doc.status === 'ready' ? `<button onclick="addToKB('${doc.id}')" class="text-xs text-green-600 hover:underline">加入KB</button>` : ''}
+                        <button onclick="deleteDoc('${doc.id}')" class="text-xs text-red-500 hover:underline">删除</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 格式化文件大小
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // 处理文档
+        async function processDoc(docId) {
+            try {
+                await api(`/documents/${docId}/process`, { method: 'POST' });
+                await loadDocuments();
+            } catch (e) {
+                alert('处理失败: ' + e.message);
+            }
+        }
+
+        // 添加到知识库
+        async function addToKB(docId) {
+            if (selectedKBs.length === 0) {
+                alert('请先选择知识库');
+                return;
+            }
+            for (const kbId of selectedKBs) {
+                try {
+                    await api(`/knowledge-bases/${kbId}/documents`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: `doc_id=${docId}`,
+                    });
+                } catch (e) {
+                    console.error('添加到知识库失败:', e);
+                }
+            }
+            alert('已添加到选中的知识库');
+            await loadKnowledgeBases();
+        }
+
+        // 删除文档
+        async function deleteDoc(docId) {
+            if (!confirm('确定要删除这个文档吗？')) return;
+            try {
+                await api(`/documents/${docId}`, { method: 'DELETE' });
+                await loadDocuments();
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        }
+
+        // 上传文档
+        function showUploadModal() {
+            document.getElementById('uploadModal').classList.remove('hidden');
+            document.getElementById('uploadModal').classList.add('flex');
+        }
+
+        function closeUploadModal() {
+            document.getElementById('uploadModal').classList.add('hidden');
+            document.getElementById('uploadModal').classList.remove('flex');
+            document.getElementById('fileInput').value = '';
+            document.getElementById('fileName').textContent = '点击选择文件或拖拽到此处';
+            document.getElementById('docTitle').value = '';
+        }
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (file) {
+                document.getElementById('fileName').textContent = file.name;
+                if (!document.getElementById('docTitle').value) {
+                    document.getElementById('docTitle').value = file.name.replace(/\.[^.]+$/, '');
+                }
+            }
+        }
+
+        async function handleUpload(e) {
+            e.preventDefault();
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('请选择文件');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('doc_type', 'private');
+            const title = document.getElementById('docTitle').value;
+            if (title) formData.append('title', title);
+
+            document.getElementById('uploadProgress').classList.remove('hidden');
+
+            try {
+                const response = await fetch(`${API_BASE}/documents/upload`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.detail || '上传失败');
+                }
+
+                const data = await response.json();
+                closeUploadModal();
+                await loadDocuments();
+
+                // 询问是否处理
+                if (confirm('文件上传成功！是否立即处理文档（提取内容并向量化）？')) {
+                    await processDoc(data.id);
+                }
+            } catch (e) {
+                alert('上传失败: ' + e.message);
+            } finally {
+                document.getElementById('uploadProgress').classList.add('hidden');
+            }
+        }
+
+        // 设置
+        function showSettingsModal() {
+            if (currentUser?.role !== 'enterprise_admin') {
+                alert('只有企业管理员可以修改设置');
+                return;
+            }
+            document.getElementById('settingsModal').classList.remove('hidden');
+            document.getElementById('settingsModal').classList.add('flex');
+            loadSettings();
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settingsModal').classList.add('hidden');
+            document.getElementById('settingsModal').classList.remove('flex');
+        }
+
+        async function loadSettings() {
+            try {
+                const settings = await api('/admin/settings');
+                if (settings.api_keys?.deepseek) document.getElementById('deepseekKey').value = settings.api_keys.deepseek;
+                if (settings.api_keys?.gemini) document.getElementById('geminiKey').value = settings.api_keys.gemini;
+                if (settings.llm_config?.model) document.getElementById('defaultModel').value = settings.llm_config.model;
+            } catch (e) {
+                console.error('加载设置失败:', e);
+            }
+        }
+
+        async function saveSettings() {
+            const apiKeys = {};
+            const deepseekKey = document.getElementById('deepseekKey').value;
+            const geminiKey = document.getElementById('geminiKey').value;
+            if (deepseekKey) apiKeys.deepseek = deepseekKey;
+            if (geminiKey) apiKeys.gemini = geminiKey;
+
+            const llmConfig = {
+                provider: document.getElementById('defaultModel').value.includes('gemini') ? 'gemini' : 'deepseek',
+                model: document.getElementById('defaultModel').value,
+            };
+
+            try {
+                await api('/admin/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `api_keys=${encodeURIComponent(JSON.stringify(apiKeys))}&llm_config=${encodeURIComponent(JSON.stringify(llm_config))}`,
+                });
+                alert('设置已保存');
+                closeSettingsModal();
+            } catch (e) {
+                alert('保存失败: ' + e.message);
+            }
+        }
+
+        // 新建知识库
+        function showCreateKBSubModal() {
+            document.getElementById('createKBSubModal').classList.remove('hidden');
+            document.getElementById('createKBSubModal').classList.add('flex');
+        }
+
+        function closeCreateKBSubModal() {
+            document.getElementById('createKBSubModal').classList.add('hidden');
+            document.getElementById('createKBSubModal').classList.remove('flex');
+            document.getElementById('kbName').value = '';
+            document.getElementById('kbDesc').value = '';
+            document.getElementById('kbPublic').checked = false;
+        }
+
+        async function handleCreateKB(e) {
+            e.preventDefault();
+            try {
+                await api('/knowledge-bases', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `name=${encodeURIComponent(document.getElementById('kbName').value)}&description=${encodeURIComponent(document.getElementById('kbDesc').value)}&is_public=${document.getElementById('kbPublic').checked}`,
+                });
+                closeCreateKBSubModal();
+                await loadKnowledgeBases();
+                alert('知识库创建成功');
+            } catch (e) {
+                alert('创建失败: ' + e.message);
+            }
+        }
+
+        // 发送问题
+        function handleKeyDown(e) {
+            if (e.ctrlKey && e.key === 'Enter') {
+                sendQuery();
+            }
+        }
+
+        async function sendQuery() {
+            const input = document.getElementById('queryInput');
+            const query = input.value.trim();
+            if (!query) return;
+
+            // 清空输入
+            input.value = '';
+
+            // 添加用户消息
+            addMessage('user', query);
+
+            // 显示加载
+            const loadingId = addLoading();
+
+            try {
+                const response = await api('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `query=${encodeURIComponent(query)}&knowledge_base_ids=${selectedKBs.join(',')}`,
+                });
+
+                removeLoading(loadingId);
+                addMessage('assistant', response.answer, response.sources);
+            } catch (e) {
+                removeLoading(loadingId);
+                addMessage('assistant', '抱歉，发生了错误: ' + e.message);
+            }
+        }
+
+        function addMessage(role, content, sources = []) {
+            const container = document.getElementById('chatContainer');
+            // 移除欢迎消息
+            const welcome = container.querySelector('.text-center');
+            if (welcome) welcome.remove();
+
+            const msgHtml = `
+                <div class="fade-in ${role === 'user' ? 'flex justify-end' : ''}">
+                    <div class="${role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100'} rounded-2xl px-4 py-3 max-w-2xl">
+                        ${role === 'assistant' ? '<div class="font-medium text-gray-800 mb-2">🤖 智能助手</div>' : ''}
+                        <div class="message-content">${escapeHtml(content)}</div>
+                        ${sources.length > 0 ? `
+                            <div class="mt-3 pt-2 border-t border-gray-200">
+                                <div class="text-xs text-gray-500 mb-2">参考来源：</div>
+                                <div class="space-y-2">
+                                    ${sources.map(s => `
+                                        <div class="source-card p-2 bg-white rounded-lg text-xs">
+                                            <div class="font-medium text-blue-600">${escapeHtml(s.title)}</div>
+                                            <div class="text-gray-500 mt-1">${escapeHtml(s.preview)}</div>
+                                            <div class="text-gray-400 mt-1">相关度: ${(s.score * 100).toFixed(0)}%</div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', msgHtml);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function addLoading() {
+            const id = 'loading-' + Date.now();
+            const container = document.getElementById('chatContainer');
+            container.insertAdjacentHTML('beforeend', `
+                <div id="${id}" class="fade-in">
+                    <div class="bg-gray-100 rounded-2xl px-4 py-3 inline-block">
+                        <div class="font-medium text-gray-800 mb-2">🤖 智能助手</div>
+                        <div class="typing-indicator"><span></span><span></span><span></span></div>
+                    </div>
+                </div>
+            `);
+            container.scrollTop = container.scrollHeight;
+            return id;
+        }
+
+        function removeLoading(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 登出
+        function logout() {
+            localStorage.removeItem('token');
+            window.location.href = '/login';
+        }
+    </script>
+</body>
+</html>
