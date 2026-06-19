@@ -550,11 +550,17 @@
         }
 
         async function saveSettings() {
-            const apiKeys = {};
             const deepseekKey = document.getElementById('deepseekKey').value;
             const geminiKey = document.getElementById('geminiKey').value;
+            const apiKeys = {};
             if (deepseekKey) apiKeys.deepseek = deepseekKey;
             if (geminiKey) apiKeys.gemini = geminiKey;
+
+            // 调试：弹出确认发送的内容
+            const confirmed = confirm(
+                `确认保存以下内容？\n\nDeepSeek Key: ${deepseekKey || '（留空，不修改）'}\nGemini Key: ${geminiKey || '（留空，不修改）'}\n\n将发送的 api_keys: ${JSON.stringify(apiKeys)}`
+            );
+            if (!confirmed) return;
 
             const llmConfig = {
                 provider: document.getElementById('defaultModel').value.includes('gemini') ? 'gemini' : 'deepseek',
