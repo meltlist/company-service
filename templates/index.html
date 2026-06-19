@@ -503,7 +503,7 @@
                 await api('/admin/settings', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: `api_keys=${encodeURIComponent(JSON.stringify(apiKeys))}&llm_config=${encodeURIComponent(JSON.stringify(llm_config))}`,
+                    body: `api_keys=${encodeURIComponent(JSON.stringify(apiKeys))}&llm_config=${encodeURIComponent(JSON.stringify(llmConfig))}`,
                 });
                 alert('设置已保存');
                 closeSettingsModal();
