@@ -128,9 +128,17 @@ class VectorStore:
         score_threshold: float = 0.5,
     ) -> list[dict]:
         """向量检索"""
-        self.connect()
+        try:
+            self.connect()
+        except Exception as e:
+            print(f"[VectorStore] connect error: {e}")
+            return []
 
-        query_vector = embedding_service.encode(query)
+        try:
+            query_vector = embedding_service.encode(query)
+        except Exception as e:
+            print(f"[VectorStore] encode error: {e}")
+            return []
 
         filter_conditions = None
         if doc_ids:
@@ -143,15 +151,19 @@ class VectorStore:
                 ]
             )
 
-        results = self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_vector.tolist(),
-            query_filter=filter_conditions,
-            limit=top_k,
-            score_threshold=score_threshold,
-            with_payload=True,
-            with_vectors=False,
-        )
+        try:
+            results = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector.tolist(),
+                query_filter=filter_conditions,
+                limit=top_k,
+                score_threshold=score_threshold,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as e:
+            print(f"[VectorStore] query_points error: {e}")
+            return []
 
         return [
             {
