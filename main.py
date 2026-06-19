@@ -295,6 +295,7 @@ async def get_me(user: User = Depends(get_current_user_dep)):
 async def upload_document(
     file: UploadFile = File(...),
     doc_type: str = Form("private"),
+    title: str = Form(None),
     knowledge_base_id: str = Form(None),
     user: User = Depends(get_current_user_dep),
     db: Session = Depends(get_db),
@@ -335,12 +336,15 @@ async def upload_document(
     # 计算哈希
     file_hash = compute_file_hash(str(file_path))
 
+    # 标题优先使用用户输入，否则使用文件名
+    doc_title = title.strip() if title and title.strip() else file.filename.replace(file_ext, "")
+
     # 创建文档记录
     doc = Document(
         id=file_id,
         enterprise_id=user.enterprise_id,
         uploader_id=user.id,
-        title=file.filename.replace(file_ext, ""),
+        title=doc_title,
         original_filename=file.filename,
         file_path=str(file_path),
         file_size=file_size,

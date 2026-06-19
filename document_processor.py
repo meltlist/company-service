@@ -218,13 +218,14 @@ class TextChunker:
                 chunks.append(self._make_chunk(current_chunk))
                 # 保留重叠部分
                 overlap_size = 0
-                current_chunk = []
+                overlap_chunk = []
                 for p in reversed(current_chunk):
                     if overlap_size + len(p) <= self.overlap:
-                        current_chunk.insert(0, p)
+                        overlap_chunk.insert(0, p)
                         overlap_size += len(p)
                     else:
                         break
+                current_chunk = overlap_chunk
                 current_size = overlap_size
                 current_chunk.append(para)
                 current_size += para_size
