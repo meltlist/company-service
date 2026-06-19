@@ -710,9 +710,22 @@ async def chat(
 
     results = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:top_k]
 
-    # 生成回答
-    rag = RAGService(llm)
-    result = rag.generate_answer(query, results, temperature=temperature)
+    # 生成回答（含异常兜底）
+    try:
+        rag = RAGService(llm)
+        result = rag.generate_answer(query, results, temperature=temperature)
+    except Exception as e:
+        err_msg = str(e)
+        if "401" in err_msg or "Unauthorized" in err_msg:
+            err_msg = "API Key 无效或已过期，请在「企业设置」中更新"
+        elif "timed out" in err_msg or "timeout" in err_msg.lower():
+            err_msg = "LLM 服务请求超时，请稍后再试"
+        elif "429" in err_msg:
+            err_msg = "请求过于频繁，请稍后再试"
+        return {
+            "answer": f"生成回答失败：{err_msg}",
+            "sources": [],
+        }
 
     # 记录 token 使用
     usage = result.get("usage", {})
@@ -724,7 +737,7 @@ async def chat(
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             total_tokens=usage.get("total_tokens", 0),
-            cost=0,  # 可根据实际计费
+            cost=0,
         )
         db.add(token_record)
         db.commit()

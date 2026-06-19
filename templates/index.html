@@ -242,7 +242,16 @@
                 logout();
                 throw new Error('登录已过期');
             }
-            const data = await response.json();
+            let data;
+            try {
+                data = await response.json();
+            } catch (jsonErr) {
+                const text = await response.text().catch(() => '服务返回非 JSON 内容');
+                if (!response.ok) {
+                    throw new Error(`服务错误 (${response.status}): ${text.substring(0, 200)}`);
+                }
+                data = {};
+            }
             if (!response.ok) throw new Error(data.detail || '请求失败');
             return data;
         }
