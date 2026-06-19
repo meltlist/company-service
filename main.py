@@ -176,7 +176,7 @@ async def register(
     enterprise_name: str = Form(None),
     db: Session = Depends(get_db),
 ):
-    """注册新用户（第一个用户自动成为企业管理员）"""
+    """注册新用户（首个注册的用户自动成为企业管理员；已有企业后注册的为普通成员）"""
     # 检查用户名和邮箱唯一性
     existing = db.query(User).filter(
         (User.username == username) | (User.email == email)
@@ -189,18 +189,20 @@ async def register(
     existing_enterprise = db.query(Enterprise).first()
 
     if existing_enterprise:
-        # 需要企业邀请码或管理员添加
-        raise HTTPException(status_code=400, detail="系统已有企业，请联系管理员添加")
+        # 已有企业时，新用户自动加入为普通成员
+        enterprise = existing_enterprise
+        enterprise_id = enterprise.id
+        role = UserRole.MEMBER
     else:
-        # 创建新企业
+        # 创建新企业，首个用户为企业管理员
         enterprise = Enterprise(
             id=str(uuid.uuid4()),
             name=enterprise_name or f"{username}的企业",
         )
         db.add(enterprise)
-
-        role = UserRole.ENTERPRISE_ADMIN
+        db.flush()
         enterprise_id = enterprise.id
+        role = UserRole.ENTERPRISE_ADMIN
 
     # 创建用户
     user = User(
