@@ -88,7 +88,7 @@
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.detail || '注册失败');
+                    throw new Error(data.detail || data.error || data.message || '注册失败');
                 }
 
                 localStorage.setItem('token', data.access_token);

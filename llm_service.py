@@ -5,7 +5,13 @@ import time
 from typing import Any, Optional
 
 import httpx
-import tiktoken
+
+try:
+    import tiktoken
+    _HAS_TIKTOKEN = True
+except ImportError:
+    tiktoken = None
+    _HAS_TIKTOKEN = False
 
 from config import settings
 
@@ -42,17 +48,23 @@ class LLMConfig:
 
 
 class TokenCounter:
-    """Token 计数器（使用 tiktoken）"""
+    """Token 计数器（使用 tiktoken，回退到按字符估算）"""
 
     def __init__(self, model: str = "gpt-4o-mini"):
         self.encoding = None
-        try:
-            self.encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            self.encoding = tiktoken.get_encoding("cl100k_base")
+        if _HAS_TIKTOKEN and tiktoken is not None:
+            try:
+                self.encoding = tiktoken.encoding_for_model(model)
+            except KeyError:
+                self.encoding = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                self.encoding = None
 
     def count(self, text: str) -> int:
-        return len(self.encoding.encode(text))
+        if self.encoding is not None:
+            return len(self.encoding.encode(text))
+        # 回退：按 4 字符 ≈ 1 token 估算
+        return max(1, len(text) // 4)
 
 
 class LLMService:

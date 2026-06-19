@@ -64,7 +64,7 @@
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.detail || '登录失败');
+                    throw new Error(data.detail || data.error || data.message || '登录失败');
                 }
 
                 localStorage.setItem('token', data.access_token);

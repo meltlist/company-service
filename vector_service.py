@@ -6,7 +6,13 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.exceptions import UnexpectedResponse
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+    _HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    SentenceTransformer = None
+    _HAS_SENTENCE_TRANSFORMERS = False
 
 from config import settings
 
@@ -15,29 +21,32 @@ class EmbeddingService:
     """Embedding 服务"""
 
     def __init__(self):
-        self.model: Optional[SentenceTransformer] = None
+        self.model: Optional[object] = None
         self.dimension: int = settings.EMBEDDING_DIM
 
     def load_model(self):
         """加载模型（延迟加载）"""
         if self.model is None:
+            if not _HAS_SENTENCE_TRANSFORMERS or SentenceTransformer is None:
+                raise RuntimeError("sentence-transformers 未安装，无法使用向量检索功能")
             self.model = SentenceTransformer(
                 settings.EMBEDDING_MODEL,
                 device=settings.EMBEDDING_DEVICE,
             )
             self.dimension = self.model.get_sentence_embedding_dimension()
 
-    def encode(self, texts: str | list[str]) -> np.ndarray:
+    def encode(self, texts) -> np.ndarray:
         """文本向量化"""
         self.load_model()
         if isinstance(texts, str):
             texts = [texts]
         embeddings = self.model.encode(texts, normalize_embeddings=True)
-        return embeddings
+        return np.array(embeddings, dtype=np.float32)
 
     def get_dimension(self) -> int:
         """获取向量维度"""
-        self.load_model()
+        if self.model is None:
+            self.load_model()
         return self.dimension
 
 

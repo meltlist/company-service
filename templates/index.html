@@ -226,15 +226,32 @@
         let documents = [];
         let selectedKBs = [];
 
+        // 从响应中提取错误消息（兼容 detail / error / message 等多种格式）
+        function extractErrorMessage(data, defaultMsg = '请求失败', status = 0) {
+            if (!data) return defaultMsg;
+            if (typeof data === 'string') return data.substring(0, 200);
+            if (data.detail) return data.detail;
+            if (data.error) return data.error;
+            if (data.message) return data.message;
+            if (data.msg) return data.msg;
+            return defaultMsg;
+        }
+
         // 初始化
         document.addEventListener('DOMContentLoaded', async () => {
             if (!token) {
                 window.location.href = '/login';
                 return;
             }
-            await loadUserInfo();
-            await loadKnowledgeBases();
-            await loadDocuments();
+            try {
+                await loadUserInfo();
+                await loadKnowledgeBases();
+                await loadDocuments();
+            } catch (e) {
+                // token 无效或过期，清理并跳转到登录
+                console.warn('初始化失败，跳转登录:', e.message);
+                logout();
+            }
         });
 
         // API 请求
@@ -260,7 +277,9 @@
                 }
                 data = {};
             }
-            if (!response.ok) throw new Error(data.detail || '请求失败');
+            if (!response.ok) {
+                throw new Error(extractErrorMessage(data, '请求失败', response.status));
+            }
             return data;
         }
 
