@@ -753,8 +753,8 @@ async def get_enterprise_settings(
 
 @app.put("/api/admin/settings", tags=["管理"])
 async def update_enterprise_settings(
-    api_keys: dict = Form(None),
-    llm_config: dict = Form(None),
+    api_keys: str = Form(None),
+    llm_config: str = Form(None),
     user: User = Depends(get_current_user_dep),
     db: Session = Depends(get_db),
 ):
@@ -764,13 +764,22 @@ async def update_enterprise_settings(
 
     enterprise = db.query(Enterprise).filter(Enterprise.id == user.enterprise_id).first()
 
+    import json as _json
     if api_keys:
-        current_keys = enterprise.api_keys or {}
-        current_keys.update(api_keys)
-        enterprise.api_keys = current_keys
+        try:
+            keys_dict = _json.loads(api_keys)
+            current_keys = enterprise.api_keys or {}
+            current_keys.update(keys_dict)
+            enterprise.api_keys = current_keys
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="api_keys 格式无效")
 
     if llm_config:
-        enterprise.llm_config = llm_config
+        try:
+            config_dict = _json.loads(llm_config)
+            enterprise.llm_config = config_dict
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="llm_config 格式无效")
 
     db.commit()
     return {"status": "success"}
