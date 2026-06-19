@@ -781,9 +781,11 @@ async def update_enterprise_settings(
     if api_keys:
         try:
             keys_dict = _json.loads(api_keys)
-            current_keys = enterprise.api_keys or {}
+            # 创建新字典替换，确保 SQLAlchemy 追踪到变更
+            current_keys = dict(enterprise.api_keys or {})
             current_keys.update(keys_dict)
             enterprise.api_keys = current_keys
+            db.flush()  # 立即刷新确认变更
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="api_keys 格式无效")
 
