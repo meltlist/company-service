@@ -159,16 +159,18 @@
                     <div>
                         <label class="block text-sm text-gray-600 mb-1">DeepSeek API Key</label>
                         <div class="flex gap-2">
-                            <input type="password" id="deepseekKey" class="flex-1 px-3 py-2 border rounded-lg" placeholder="sk-...">
+                            <input type="password" id="deepseekKey" class="flex-1 px-3 py-2 border rounded-lg" placeholder="sk-...（留空则不改）">
                             <button type="button" onclick="toggleApiKey('deepseekKey', this)" class="px-3 py-2 border rounded-lg text-gray-600 hover:bg-gray-50 whitespace-nowrap">👁 显示</button>
                         </div>
+                        <div id="deepseekKeyStatus" class="text-xs text-gray-500 mt-1">状态：加载中…</div>
                     </div>
                     <div>
                         <label class="block text-sm text-gray-600 mb-1">Gemini API Key</label>
                         <div class="flex gap-2">
-                            <input type="password" id="geminiKey" class="flex-1 px-3 py-2 border rounded-lg" placeholder="AIza...">
+                            <input type="password" id="geminiKey" class="flex-1 px-3 py-2 border rounded-lg" placeholder="AIza...（留空则不改）">
                             <button type="button" onclick="toggleApiKey('geminiKey', this)" class="px-3 py-2 border rounded-lg text-gray-600 hover:bg-gray-50 whitespace-nowrap">👁 显示</button>
                         </div>
+                        <div id="geminiKeyStatus" class="text-xs text-gray-500 mt-1">状态：加载中…</div>
                     </div>
                     <div>
                         <label class="block text-sm text-gray-600 mb-1">默认模型</label>
@@ -494,11 +496,37 @@
         async function loadSettings() {
             try {
                 const settings = await api('/admin/settings');
-                if (settings.api_keys?.deepseek) document.getElementById('deepseekKey').value = settings.api_keys.deepseek;
-                if (settings.api_keys?.gemini) document.getElementById('geminiKey').value = settings.api_keys.gemini;
-                if (settings.llm_config?.model) document.getElementById('defaultModel').value = settings.llm_config.model;
+
+                const deepseekStatus = document.getElementById('deepseekKeyStatus');
+                const geminiStatus = document.getElementById('geminiKeyStatus');
+                const deepseekMasked = settings.api_keys_masked?.deepseek;
+                const geminiMasked = settings.api_keys_masked?.gemini;
+
+                if (deepseekMasked && deepseekMasked !== '****') {
+                    deepseekStatus.textContent = `状态：已保存 · ${deepseekMasked}`;
+                    deepseekStatus.className = 'text-xs text-green-600 mt-1';
+                } else {
+                    deepseekStatus.textContent = '状态：未设置';
+                    deepseekStatus.className = 'text-xs text-gray-400 mt-1';
+                }
+
+                if (geminiMasked && geminiMasked !== '****') {
+                    geminiStatus.textContent = `状态：已保存 · ${geminiMasked}`;
+                    geminiStatus.className = 'text-xs text-green-600 mt-1';
+                } else {
+                    geminiStatus.textContent = '状态：未设置';
+                    geminiStatus.className = 'text-xs text-gray-400 mt-1';
+                }
+
+                if (settings.llm_config?.model) {
+                    document.getElementById('defaultModel').value = settings.llm_config.model;
+                }
             } catch (e) {
                 console.error('加载设置失败:', e);
+                const deepseekStatus = document.getElementById('deepseekKeyStatus');
+                const geminiStatus = document.getElementById('geminiKeyStatus');
+                if (deepseekStatus) deepseekStatus.textContent = '状态：加载失败';
+                if (geminiStatus) geminiStatus.textContent = '状态：加载失败';
             }
         }
 

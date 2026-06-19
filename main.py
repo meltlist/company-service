@@ -759,7 +759,7 @@ async def get_enterprise_settings(
 
     return {
         "name": enterprise.name,
-        "api_keys": {k: "****" + v[-4:] if v else "" for k, v in (enterprise.api_keys or {}).items()},
+        "api_keys_masked": {k: "****" + v[-4:] if v else "" for k, v in (enterprise.api_keys or {}).items()},
         "llm_config": enterprise.llm_config,
     }
 
