@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>企业管理 - 组织架构与人员</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .tree-line { border-left: 2px dashed #cbd5e1; margin-left: 12px; padding-left: 12px; }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .tab-btn.active { background: #2563eb; color: white; }
+        .modal-overlay { background: rgba(15, 23, 42, 0.5); }
+        .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 500; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+    <!-- 顶部导航 -->
+    <nav class="bg-white shadow-sm border-b sticky top-0 z-40">
+        <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <span class="text-xl font-bold text-slate-800">🏢 企业管理</span>
+                <span id="userInfo" class="text-sm text-slate-500 hidden"></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <a href="/" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">返回知识库</a>
+                <button onclick="logout()" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100">退出</button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Tab 导航 -->
+    <div class="max-w-6xl mx-auto px-4 py-4">
+        <div class="flex flex-wrap gap-2 mb-6">
+            <button onclick="switchTab('org')" class="tab-btn active px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">🌐 组织架构</button>
+            <button onclick="switchTab('join')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">📝 加入申请</button>
+            <button onclick="switchTab('team')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">👥 我的团队</button>
+            <button onclick="switchTab('settings')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">⚙️ 企业设置</button>
+        </div>
+
+        <!-- 各 Tab 内容 -->
+        <div id="tab-org" class="tab-content fade-in"></div>
+        <div id="tab-join" class="tab-content fade-in hidden"></div>
+        <div id="tab-team" class="tab-content fade-in hidden"></div>
+        <div id="tab-settings" class="tab-content fade-in hidden"></div>
+    </div>
+
+    <!-- 通用 Modal -->
+    <div id="modal" class="fixed inset-0 modal-overlay items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto">
+            <div class="flex items-center justify-between p-4 border-b sticky top-0 bg-white">
+                <h3 id="modalTitle" class="font-semibold text-slate-800"></h3>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+            </div>
+            <div id="modalBody" class="p-4"></div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="fixed top-20 right-4 z-50 hidden px-4 py-3 rounded-lg shadow-lg text-sm"></div>
+
+    <script>
+        // ---------- 认证工具 ----------
+        function getToken() { return localStorage.getItem('token'); }
+        async function api(path, opts = {}) {
+            const token = getToken();
+            const headers = opts.headers || {};
+            if (token && !headers['Authorization']) {
+                headers['Authorization'] = 'Bearer ' + token;
+            }
+            const res = await fetch(path, { ...opts, headers });
+            if (res.status === 401) {
+                showToast('请先登录', 'error');
+                setTimeout(() => { location.href = '/login'; }, 800);
+                throw new Error('未登录');
+            }
+            const contentType = res.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await res.json() : null;
+            if (!res.ok) {
+                const msg = data && data.detail ? data.detail : ('操作失败 (' + res.status + ')');
+                showToast(msg, 'error');
+                throw new Error(msg);
+            }
+            return data;
+        }
+
+        function showToast(msg, type) {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.className = 'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm fade-in ' + (
+                type === 'error' ? 'bg-red-100 text-red-700 border border-red-200' :
+                type === 'success' ? 'bg-green-100 text-green-700 border border-green-200' :
+                'bg-blue-100 text-blue-700 border border-blue-200'
+            );
+            setTimeout(() => { el.classList.add('hidden'); }, 3000);
+        }
+
+        function logout() {
+            localStorage.removeItem('token');
+            location.href = '/login';
+        }
+
+        function showModal(title, bodyHtml) {
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalBody').innerHTML = bodyHtml;
+            const m = document.getElementById('modal');
+            m.classList.remove('hidden');
+            m.classList.add('flex');
+        }
+        function closeModal() {
+            const m = document.getElementById('modal');
+            m.classList.add('hidden');
+            m.classList.remove('flex');
+        }
+
+        // ---------- 全局状态 ----------
+        let currentUser = null;
+        let departmentList = [];
+        let userList = [];
+
+        async function initApp() {
+            if (!getToken()) { location.href = '/login'; return; }
+            try {
+                currentUser = await api('/api/users/details');
+                departmentList = await api('/api/departments');
+                document.getElementById('userInfo').textContent = currentUser.full_name + (currentUser.is_admin ? ' · 企业管理员' : '');
+                document.getElementById('userInfo').classList.remove('hidden');
+                renderOrg();
+                renderJoin();
+                renderTeam();
+                renderSettings();
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // ---------- Tab 切换 ----------
+        function switchTab(tab) {
+            ['org', 'join', 'team', 'settings'].forEach(t => {
+                document.getElementById('tab-' + t).classList.add('hidden');
+            });
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tab-' + tab).classList.remove('hidden');
+            event.target.classList.add('active');
+            // 进入 tab 时刷新数据
+            if (tab === 'org') renderOrg();
+            if (tab === 'join') renderJoin();
+            if (tab === 'team') renderTeam();
+            if (tab === 'settings') renderSettings();
+        }
+
+        // ---------- 组织架构 Tab ----------
+        async function renderOrg() {
+            const container = document.getElementById('tab-org');
+            let tree;
+            try { tree = await api('/api/departments/tree'); }
+            catch { tree = []; }
+            userList = await api('/api/admin/users').catch(() => []);
+
+            let html = '<div class="bg-white rounded-xl shadow-sm p-6">';
+            html += '<div class="flex items-center justify-between mb-4"><h2 class="text-lg font-semibold text-slate-800">🌐 组织架构</h2>';
+            if (currentUser && currentUser.is_admin) {
+                html += '<button onclick="openCreateDeptModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">+ 新建部门</button>';
+            }
+            html += '</div>';
+
+            if (!tree || tree.length === 0) {
+                html += '<div class="text-center py-12 text-slate-500">';
+                html += '<div class="text-4xl mb-3">🌱</div>';
+                html += '<p>暂无组织架构</p>';
+                if (currentUser && currentUser.is_admin) {
+                    html += '<p class="text-sm mt-2 text-slate-400">点击右上角"新建部门"开始构建组织架构</p>';
+                } else {
+                    html += '<p class="text-sm mt-2 text-slate-400">等待企业管理员创建部门后，你可以申请加入</p>';
+                }
+                html += '</div>';
+            } else {
+                html += '<div class="space-y-3">' + renderDeptNodes(tree, 0) + '</div>';
+            }
+            html += '</div>';
+
+            // 无部门用户列表
+            if (userList && userList.length > 0) {
+                const unassigned = userList.filter(u => !u.department_id);
+                if (unassigned.length > 0) {
+                    html += '<div class="bg-white rounded-xl shadow-sm p-6 mt-4">';
+                    html += '<h3 class="text-md font-semibold text-slate-700 mb-3">👤 未分配部门成员 (' + unassigned.length + ')</h3>';
+                    html += '<div class="space-y-2">';
+                    unassigned.forEach(u => {
+                        html += renderMemberCard(u, true);
+                    });
+                    html += '</div></div>';
+                }
+            }
+            container.innerHTML = html;
+        }
+
+        function renderDeptNodes(nodes, level) {
+            let html = '';
+            nodes.forEach(node => {
+                html += '<div class="fade-in">';
+                html += '<div class="bg-slate-50 border border-slate-200 rounded-lg p-4">';
+                html += '<div class="flex items-center justify-between">';
+                html += '<div class="flex items-center gap-2 flex-1">';
+                const icon = level === 0 ? '🏛️' : '🏢';
+                html += '<span class="text-lg">' + icon + '</span>';
+                html += '<span class="font-semibold text-slate-800">' + escape(node.name) + '</span>';
+                if (node.manager_name) {
+                    html += '<span class="badge bg-amber-100 text-amber-700">负责人: ' + escape(node.manager_name) + '</span>';
+                }
+                if (node.members && node.members.length > 0) {
+                    html += '<span class="badge bg-blue-100 text-blue-700">' + node.members.length + ' 人</span>';
+                }
+                if (node.description) {
+                    html += '<span class="text-sm text-slate-500 ml-2">' + escape(node.description) + '</span>';
+                }
+                html += '</div>';
+                if (currentUser && currentUser.is_admin) {
+                    html += '<div class="flex items-center gap-1">';
+                    html += '<button onclick="openEditDeptModal(\'' + node.id + '\',\'' + escape(node.name).replace(/'/g, '\\\'') + '\',\'' + (node.description ? escape(node.description).replace(/'/g, '\\\'') : '') + '\',\'' + (node.parent_id || '') + '\',\'' + (node.manager_id || '') + '\')" class="text-sm text-slate-500 hover:text-blue-600 px-2 py-1">编辑</button>';
+                    html += '<button onclick="deleteDept(\'' + node.id + '\',\'' + escape(node.name).replace(/'/g, '\\\'') + '\')" class="text-sm text-slate-500 hover:text-red-600 px-2 py-1">删除</button>';
+                    html += '</div>';
+                }
+                html += '</div>';
+
+                if (node.members && node.members.length > 0) {
+                    html += '<div class="mt-3 space-y-2">';
+                    node.members.forEach(m => {
+                        html += renderMemberCard(m, false);
+                    });
+                    html += '</div>';
+                }
+
+                // 子部门
+                if (node.children && node.children.length > 0) {
+                    html += '<div class="tree-line mt-4">' + renderDeptNodes(node.children, level + 1) + '</div>';
+                }
+                html += '</div></div>';
+            });
+            return html;
+        }
+
+        function renderMemberCard(user, isUnassigned) {
+            let html = '<div class="flex items-center justify-between bg-white border border-slate-100 rounded-lg p-3 hover:border-blue-200 transition">';
+            html += '<div class="flex items-center gap-3">';
+            html += '<div class="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-sm font-bold">' + (user.full_name || user.username).charAt(0).toUpperCase() + '</div>';
+            html += '<div>';
+            html += '<div class="font-medium text-slate-800 text-sm">' + escape(user.full_name || user.username) + '</div>';
+            html += '<div class="text-xs text-slate-500">' + escape(user.email || user.username) + '</div>';
+            html += '</div></div>';
+            html += '<div class="flex items-center gap-2">';
+            if (user.role === 'enterprise_admin') html += '<span class="badge bg-purple-100 text-purple-700">企业管理员</span>';
+            else if (user.role === 'manager') html += '<span class="badge bg-amber-100 text-amber-700">经理</span>';
+            else html += '<span class="badge bg-slate-100 text-slate-700">成员</span>';
+            if (user.manager_name) html += '<span class="text-xs text-slate-500">汇报给: ' + escape(user.manager_name) + '</span>';
+            if (isUnassigned && currentUser && currentUser.is_admin) {
+                html += '<button onclick="openAssignModal(\'' + user.id + '\',\'' + escape(user.full_name || user.username).replace(/'/g, '\\\'') + '\')" class="text-sm text-blue-600 hover:text-blue-800 px-2 py-1">分配</button>';
+            }
+            html += '</div>';
+            return html + '</div>';
+        }
+
+        function openCreateDeptModal() {
+            const options = departmentList.map(d =>
+                '<option value="' + d.id + '">' + escape(d.name) + '</option>'
+            ).join('');
+            const userOptions = '<option value="">(暂不指定)</option>' +
+                userList.map(u => '<option value="' + u.id + '">' + escape(u.full_name || u.username) + '</option>').join('');
+
+            showModal('新建部门',
+                '<form onsubmit="createDept(event)" class="space-y-4">' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">部门名称 *</label><input id="dept-name" type="text" required class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">描述</label><textarea id="dept-desc" rows="2" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">上级部门</label><select id="dept-parent" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"><option value="">(顶层部门)</option>' + options + '</select></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">部门负责人</label><select id="dept-manager" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + userOptions + '</select></div>' +
+                '<div class="flex justify-end gap-2 pt-2"><button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">创建</button></div>' +
+                '</form>'
+            );
+        }
+
+        async function createDept(e) {
+            e.preventDefault();
+            const name = document.getElementById('dept-name').value;
+            const desc = document.getElementById('dept-desc').value;
+            const parent = document.getElementById('dept-parent').value;
+            const manager = document.getElementById('dept-manager').value;
+            const body = new FormData();
+            body.append('name', name);
+            if (desc) body.append('description', desc);
+            if (parent) body.append('parent_id', parent);
+            if (manager) body.append('manager_id', manager);
+            await api('/api/departments', { method: 'POST', body });
+            showToast('部门已创建', 'success');
+            closeModal();
+            renderOrg();
+        }
+
+        function openEditDeptModal(id, name, desc, parent_id, manager_id) {
+            const options = '<option value="">(顶层部门)</option>' + departmentList.filter(d => d.id !== id).map(d =>
+                '<option value="' + d.id + '" ' + (d.id === parent_id ? 'selected' : '') + '>' + escape(d.name) + '</option>'
+            ).join('');
+            const userOptions = '<option value="">(暂不指定)</option>' +
+                userList.map(u => '<option value="' + u.id + '" ' + (u.id === manager_id ? 'selected' : '') + '>' + escape(u.full_name || u.username) + '</option>').join('');
+
+            showModal('编辑部门',
+                '<form onsubmit="updateDept(event,\'' + id + '\')" class="space-y-4">' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">部门名称 *</label><input id="edit-dept-name" type="text" value="' + escape(name) + '" required class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">描述</label><textarea id="edit-dept-desc" rows="2" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + escape(desc || '') + '</textarea></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">上级部门</label><select id="edit-dept-parent" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + options + '</select></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">部门负责人</label><select id="edit-dept-manager" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + userOptions + '</select></div>' +
+                '<div class="flex justify-end gap-2 pt-2"><button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button></div>' +
+                '</form>'
+            );
+        }
+
+        async function updateDept(e, id) {
+            e.preventDefault();
+            const name = document.getElementById('edit-dept-name').value;
+            const desc = document.getElementById('edit-dept-desc').value;
+            const parent = document.getElementById('edit-dept-parent').value;
+            const manager = document.getElementById('edit-dept-manager').value;
+            const body = new FormData();
+            body.append('name', name);
+            body.append('description', desc);
+            body.append('parent_id', parent);
+            body.append('manager_id', manager);
+            await api('/api/departments/' + id, { method: 'PUT', body });
+            showToast('部门已更新', 'success');
+            closeModal();
+            renderOrg();
+        }
+
+        async function deleteDept(id, name) {
+            if (!confirm('确认删除部门 "' + name + '" 吗？该部门下成员将被解除部门归属。')) return;
+            await api('/api/departments/' + id, { method: 'DELETE' });
+            showToast('部门已删除', 'success');
+            renderOrg();
+        }
+
+        function openAssignModal(userId, userName) {
+            const deptOptions = '<option value="">(暂不分配部门)</option>' + departmentList.map(d =>
+                '<option value="' + d.id + '">' + escape(d.name) + '</option>'
+            ).join('');
+            const mgrOptions = '<option value="">(暂不分配上级)</option>' + userList.filter(u => u.id !== userId).map(u =>
+                '<option value="' + u.id + '">' + escape(u.full_name || u.username) + '</option>'
+            ).join('');
+
+            showModal('分配: ' + userName,
+                '<form onsubmit="assignUser(event,\'' + userId + '\')" class="space-y-4">' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">所属部门</label><select id="assign-dept" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + deptOptions + '</select></div>' +
+                '<div><label class="block text-sm font-medium text-slate-700 mb-1">直接上级</label><select id="assign-manager" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + mgrOptions + '</select></div>' +
+                '<div class="flex justify-end gap-2 pt-2"><button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">取消</button><button type="submit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button></div>' +
+                '</form>'
+            );
+        }
+
+        async function assignUser(e, userId) {
+            e.preventDefault();
+            const dept = document.getElementById('assign-dept').value;
+            const mgr = document.getElementById('assign-manager').value;
+            const body = new FormData();
+            body.append('department_id', dept);
+            body.append('manager_id', mgr);
+            await api('/api/users/' + userId + '/department', { method: 'PUT', body });
+            showToast('已更新归属', 'success');
+            closeModal();
+            renderOrg();
+        }
+
+        // ---------- 加入申请 Tab ----------
+        async function renderJoin() {
+            const container = document.getElementById('tab-join');
+            let html = '';
+
+            // 1. 我当前的状态
+            const myRequests = await api('/api/join-requests/mine').catch(() => []);
+            html += '<div class="bg-white rounded-xl shadow-sm p-6 mb-4">';
+            html += '<h2 class="text-lg font-semibold text-slate-800 mb-4">📋 我的申请状态</h2>';
+            if (myRequests && myRequests.length > 0) {
+                html += '<div class="space-y-2">';
+                myRequests.forEach(r => {
+                    const statusBadge = r.status === 'pending'
+                        ? '<span class="badge bg-yellow-100 text-yellow-700">待审批</span>'
+                        : r.status === 'approved'
+                            ? '<span class="badge bg-green-100 text-green-700">已通过</span>'
+                            : '<span class="badge bg-red-100 text-red-700">已拒绝</span>';
+                    html += '<div class="border border-slate-200 rounded-lg p-3">';
+                    html += '<div class="flex items-center justify-between">';
+                    html += '<div class="flex items-center gap-2 text-sm">';
+                    html += '<span>申请加入</span>';
+                    if (r.department_name) html += '<span class="font-medium">「' + escape(r.department_name) + '」</span>';
+                    if (r.target_manager_name) html += '<span class="text-slate-500">汇报给 ' + escape(r.target_manager_name) + '</span>';
+                    html += '</div>';
+                    html += statusBadge;
+                    html += '</div>';
+                    if (r.message) html += '<div class="text-xs text-slate-500 mt-1">申请说明: ' + escape(r.message) + '</div>';
+                    if (r.review_note) html += '<div class="text-xs text-slate-500 mt-1">审批意见: ' + escape(r.review_note) + '</div>';
+                    html += '<div class="text-xs text-slate-400 mt-1">提交时间: ' + r.created_at + '</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            } else {
+                html += '<div class="text-sm text-slate-500 py-4">暂无申请记录</div>';
+            }
+            html += '</div>';
+
+            // 2. 申请加入
+            const hasPending = myRequests && myRequests.some(r => r.status === 'pending');
+            const depts = await api('/api/departments').catch(() => []);
+            html += '<div class="bg-white rounded-xl shadow-sm p-6 mb-4">';
+            html += '<h2 class="text-lg font-semibold text-slate-800 mb-4">📝 申请加入部门/团队</h2>';
+            if (hasPending) {
+                html += '<div class="text-sm text-yellow-700 bg-yellow-50 rounded-lg p-3">你已有待审批的申请，请等待审批后再提交新申请。</div>';
+            } else if (!depts || depts.length === 0) {
+                html += '<div class="text-sm text-slate-500">暂无可申请的部门，请等待管理员创建部门。</div>';
+            } else {
+                const deptOptions = '<option value="">(不指定部门，仅选上级)</option>' + depts.map(d =>
+                    '<option value="' + d.id + '">' + escape(d.name) + (d.manager_name ? ' - 负责人: ' + escape(d.manager_name) : '') + '</option>'
+                ).join('');
+                const mgrOptions = '<option value="">(不指定上级)</option>' + userList.filter(u => u.id !== currentUser.id).map(u =>
+                    '<option value="' + u.id + '">' + escape(u.full_name || u.username) + (u.role === 'enterprise_admin' ? ' (管理员)' : '') + '</option>'
+                ).join('');
+
+                html += '<form onsubmit="submitJoinRequest(event)" class="space-y-4">' +
+                    '<div><label class="block text-sm font-medium text-slate-700 mb-1">选择部门</label><select id="join-dept" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + deptOptions + '</select></div>' +
+                    '<div><label class="block text-sm font-medium text-slate-700 mb-1">选择直接上级 (可选)</label><select id="join-manager" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">' + mgrOptions + '</select></div>' +
+                    '<div><label class="block text-sm font-medium text-slate-700 mb-1">申请说明</label><textarea id="join-msg" rows="2" placeholder="简要介绍自己加入团队的理由" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea></div>' +
+                    '<div class="flex justify-end"><button type="submit" class="px-5 py-2.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">提交申请</button></div>' +
+                    '</form>';
+            }
+            html += '</div>';
+
+            // 3. 待我审批的申请
+            try {
+                const pending = await api('/api/join-requests/pending');
+                if (pending && pending.length > 0) {
+                    html += '<div class="bg-white rounded-xl shadow-sm p-6">';
+                    html += '<h2 class="text-lg font-semibold text-slate-800 mb-4">🔍 待我审批的申请 (' + pending.length + ')</h2>';
+                    html += '<div class="space-y-2">';
+                    pending.forEach(p => {
+                        html += '<div class="border border-slate-200 rounded-lg p-4">';
+                        html += '<div class="flex items-center justify-between">';
+                        html += '<div>';
+                        html += '<div class="font-medium text-slate-800">' + escape(p.user_name || p.user_email) + '</div>';
+                        html += '<div class="text-xs text-slate-500 mt-0.5">';
+                        if (p.department_name) html += '申请加入「' + escape(p.department_name) + '」';
+                        if (p.target_manager_name) html += ' · 汇报给 ' + escape(p.target_manager_name);
+                        html += '</div>';
+                        if (p.message) html += '<div class="text-sm text-slate-600 mt-2 italic">" ' + escape(p.message) + ' "</div>';
+                        html += '<div class="text-xs text-slate-400 mt-1">' + p.created_at + '</div>';
+                        html += '</div>';
+                        html += '<div class="flex gap-2">';
+                        html += '<button onclick="reviewRequest(\'' + p.id + '\',true)" class="px-3 py-1.5 bg-green-600 text-white text-xs rounded-lg hover:bg-green-700">通过</button>';
+                        html += '<button onclick="reviewRequest(\'' + p.id + '\',false)" class="px-3 py-1.5 bg-red-600 text-white text-xs rounded-lg hover:bg-red-700">拒绝</button>';
+                        html += '</div>';
+                        html += '</div></div>';
+                    });
+                    html += '</div></div>';
+                }
+            } catch (e) { /* 无权限查看则忽略 */ }
+
+            container.innerHTML = html;
+        }
+
+        async function submitJoinRequest(e) {
+            e.preventDefault();
+            const dept = document.getElementById('join-dept').value;
+            const mgr = document.getElementById('join-manager').value;
+            const msg = document.getElementById('join-msg').value;
+            if (!dept && !mgr) { showToast('请选择部门或上级', 'error'); return; }
+            const body = new FormData();
+            if (dept) body.append('department_id', dept);
+            if (mgr) body.append('target_manager_id', mgr);
+            if (msg) body.append('message', msg);
+            await api('/api/join-requests', { method: 'POST', body });
+            showToast('申请已提交', 'success');
+            renderJoin();
+        }
+
+        async function reviewRequest(id, approve) {
+            const op = approve ? 'approve' : 'reject';
+            if (!confirm(approve ? '确认通过此申请？' : '确认拒绝此申请？')) return;
+            await api('/api/join-requests/' + id + '/' + op, { method: 'POST' });
+            showToast(approve ? '已通过申请' : '已拒绝申请', 'success');
+            renderJoin();
+            renderOrg();
+        }
+
+        // ---------- 我的团队 Tab ----------
+        async function renderTeam() {
+            const container = document.getElementById('tab-team');
+            let html = '';
+
+            html += '<div class="bg-white rounded-xl shadow-sm p-6 mb-4">';
+            html += '<div class="mb-4">';
+            html += '<h2 class="text-lg font-semibold text-slate-800 mb-2">👤 我的档案</h2>';
+            html += '<div class="grid grid-cols-2 gap-3 text-sm">';
+            html += '<div class="bg-slate-50 p-3 rounded-lg"><div class="text-slate-500 text-xs">姓名</div><div class="font-medium text-slate-800">' + escape(currentUser.full_name) + '</div></div>';
+            html += '<div class="bg-slate-50 p-3 rounded-lg"><div class="text-slate-500 text-xs">角色</div><div class="font-medium text-slate-800">' + (currentUser.role === 'enterprise_admin' ? '企业管理员' : currentUser.role === 'manager' ? '经理' : '成员') + '</div></div>';
+            html += '<div class="bg-slate-50 p-3 rounded-lg"><div class="text-slate-500 text-xs">部门</div><div class="font-medium text-slate-800">' + (currentUser.department_name || '未分配') + '</div></div>';
+            html += '<div class="bg-slate-50 p-3 rounded-lg"><div class="text-slate-500 text-xs">直接上级</div><div class="font-medium text-slate-800">' + (currentUser.manager_name || '未分配') + '</div></div>';
+            html += '</div></div>';
+
+            // 团队树
+            const team = await api('/api/users/team').catch(() => []);
+            html += '<h2 class="text-lg font-semibold text-slate-800 mb-3">🌳 我的下属</h2>';
+            if (!team || team.length === 0) {
+                html += '<div class="text-sm text-slate-500 py-6 text-center bg-slate-50 rounded-lg">暂无下属。部门负责人或上级可通过审批加入申请将你设定为上级。</div>';
+            } else {
+                html += '<div class="space-y-2">' + renderTeamNodes(team, 0) + '</div>';
+            }
+            html += '</div>';
+
+            container.innerHTML = html;
+        }
+
+        function renderTeamNodes(nodes, level) {
+            let html = '';
+            nodes.forEach(n => {
+                html += '<div class="fade-in">';
+                html += '<div class="border border-slate-200 rounded-lg p-3 bg-white hover:border-blue-200 transition">';
+                html += '<div class="flex items-center justify-between">';
+                html += '<div class="flex items-center gap-3">';
+                html += '<div class="w-8 h-8 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center text-white text-sm font-bold">' + escape((n.full_name || n.username).charAt(0).toUpperCase()) + '</div>';
+                html += '<div>';
+                html += '<div class="font-medium text-slate-800 text-sm">' + escape(n.full_name || n.username) + '</div>';
+                html += '<div class="text-xs text-slate-500">' + escape(n.email) + (n.department_name ? ' · ' + escape(n.department_name) : '') + '</div>';
+                html += '</div>';
+                html += '</div>';
+                html += '<div class="flex items-center gap-2">';
+                if (n.role === 'enterprise_admin') html += '<span class="badge bg-purple-100 text-purple-700">企业管理员</span>';
+                else if (n.role === 'manager') html += '<span class="badge bg-amber-100 text-amber-700">经理</span>';
+                if (n.children && n.children.length > 0) html += '<span class="badge bg-blue-100 text-blue-700">下属 ' + countTeamTotal(n) + ' 人</span>';
+                if (currentUser && currentUser.is_admin) {
+                    html += '<button onclick="openAssignModal(\'' + n.id + '\',\'' + escape((n.full_name || n.username)).replace(/'/g, '\\\'') + '\')" class="text-xs text-blue-600 hover:text-blue-800 px-2 py-1 ml-2">调整归属</button>';
+                }
+                html += '</div>';
+                html += '</div>';
+
+                if (n.children && n.children.length > 0) {
+                    html += '<div class="tree-line mt-3">' + renderTeamNodes(n.children, level + 1) + '</div>';
+                }
+                html += '</div></div>';
+            });
+            return html;
+        }
+
+        function countTeamTotal(node) {
+            let count = node.children ? node.children.length : 0;
+            if (node.children) node.children.forEach(c => count += countTeamTotal(c));
+            return count;
+        }
+
+        // ---------- 企业设置 Tab ----------
+        async function renderSettings() {
+            const container = document.getElementById('tab-settings');
+            let settingsData;
+            try {
+                settingsData = await api('/api/admin/settings');
+            } catch (e) {
+                container.innerHTML = '<div class="bg-white rounded-xl shadow-sm p-6"><div class="text-sm text-red-600">无权限查看企业设置</div></div>';
+                return;
+            }
+
+            const depts = await api('/api/departments').catch(() => []);
+            const users = await api('/api/admin/users').catch(() => []);
+
+            let html = '<div class="bg-white rounded-xl shadow-sm p-6 mb-4">';
+            html += '<h2 class="text-lg font-semibold text-slate-800 mb-4">⚙️ 企业配置</h2>';
+            html += '<form onsubmit="saveSettings(event)" class="space-y-4">';
+
+            // API Keys 显示
+            if (settingsData.api_keys_masked) {
+                html += '<div class="mb-4"><label class="block text-sm font-medium text-slate-700 mb-2">当前 API Key</label>';
+                Object.keys(settingsData.api_keys_masked).forEach(k => {
+                    html += '<div class="bg-slate-50 rounded-lg p-3 mb-2 flex items-center justify-between text-sm">';
+                    html += '<div><span class="font-medium text-slate-700">' + escape(k) + '</span> <span class="text-slate-500 ml-2">' + escape(settingsData.api_keys_masked[k]) + '</span></div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">更新 DeepSeek API Key</label><input id="cfg-deepseek" type="password" placeholder="sk-..." class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"></div>';
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">更新 Gemini API Key</label><input id="cfg-gemini" type="password" placeholder="..." class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"></div>';
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">默认模型</label><input id="cfg-model" type="text" placeholder="deepseek-chat" value="' + escape((settingsData.llm_config && settingsData.llm_config.model) || '') + '" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"></div>';
+
+            html += '<div class="flex justify-end pt-2"><button type="submit" class="px-5 py-2.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">保存设置</button></div>';
+            html += '</form></div>';
+
+            // 全员统计
+            if (users && users.length) {
+                html += '<div class="bg-white rounded-xl shadow-sm p-6">';
+                html += '<h2 class="text-lg font-semibold text-slate-800 mb-3">📊 人员统计</h2>';
+                html += '<div class="grid grid-cols-3 gap-3 text-center">';
+                html += '<div class="bg-blue-50 p-4 rounded-lg"><div class="text-2xl font-bold text-blue-700">' + users.length + '</div><div class="text-xs text-blue-600 mt-1">企业总人数</div></div>';
+                html += '<div class="bg-green-50 p-4 rounded-lg"><div class="text-2xl font-bold text-green-700">' + users.filter(u => u.department_id).length + '</div><div class="text-xs text-green-600 mt-1">已分配部门</div></div>';
+                html += '<div class="bg-amber-50 p-4 rounded-lg"><div class="text-2xl font-bold text-amber-700">' + users.filter(u => !u.department_id).length + '</div><div class="text-xs text-amber-600 mt-1">未分配部门</div></div>';
+                html += '</div></div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        async function saveSettings(e) {
+            e.preventDefault();
+            const deepseek = document.getElementById('cfg-deepseek').value;
+            const gemini = document.getElementById('cfg-gemini').value;
+            const model = document.getElementById('cfg-model').value;
+            const keysBody = new FormData();
+            if (deepseek) keysBody.append('api_keys', JSON.stringify({ deepseek: deepseek }));
+            if (gemini) keysBody.append('api_keys', JSON.stringify({ gemini: gemini }));
+            if (model) {
+                const cfgBody = new FormData();
+                cfgBody.append('llm_config', JSON.stringify({ model: model, provider: 'deepseek' }));
+                if (deepseek) cfgBody.append('api_keys', JSON.stringify({ deepseek: deepseek }));
+                if (gemini) cfgBody.append('api_keys', JSON.stringify({ gemini: gemini }));
+                try { await api('/api/admin/settings', { method: 'PUT', body: cfgBody }); }
+                catch (e) { return; }
+            } else if (keysBody.has('api_keys')) {
+                try { await api('/api/admin/settings', { method: 'PUT', body: keysBody }); }
+                catch (e) { return; }
+            }
+            showToast('设置已保存', 'success');
+            renderSettings();
+        }
+
+        // ---------- 工具 ----------
+        function escape(s) {
+            if (s === null || s === undefined) return '';
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        // 启动
+        initApp();
+    </script>
+</body>
+</html>

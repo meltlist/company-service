@@ -89,6 +89,7 @@ class User(Base):
     id = Column(String(36), primary_key=True)
     enterprise_id = Column(String(36), ForeignKey("enterprises.id"), nullable=False)
     department_id = Column(String(36), ForeignKey("departments.id"), nullable=True)
+    manager_id = Column(String(36), ForeignKey("users.id"), nullable=True)  # 直接上级
     username = Column(String(100), unique=True, nullable=False)
     email = Column(String(200), unique=True, nullable=False)
     hashed_password = Column(String(200), nullable=False)
@@ -100,6 +101,8 @@ class User(Base):
 
     enterprise = relationship("Enterprise", back_populates="users")
     department = relationship("Department", back_populates="users", foreign_keys=[department_id])
+    manager = relationship("User", remote_side=[id], back_populates="subordinates")
+    subordinates = relationship("User", back_populates="manager")
     documents = relationship("Document", back_populates="uploader")
     knowledge_bases = relationship("UserKnowledgeBase", back_populates="user")
     token_usage = relationship("TokenUsage", back_populates="user")
@@ -181,6 +184,32 @@ class TokenUsage(Base):
     user = relationship("User", back_populates="token_usage")
 
 
+class JoinRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class JoinRequest(Base):
+    __tablename__ = "join_requests"
+
+    id = Column(String(36), primary_key=True)
+    enterprise_id = Column(String(36), ForeignKey("enterprises.id"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    department_id = Column(String(36), ForeignKey("departments.id"), nullable=True)
+    target_manager_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    message = Column(Text)
+    status = Column(SAEnum(JoinRequestStatus), default=JoinRequestStatus.PENDING)
+    review_note = Column(Text)
+    reviewed_by_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+    department = relationship("Department", foreign_keys=[department_id])
+    target_manager = relationship("User", foreign_keys=[target_manager_id])
+
+
 def init_db(database_url: str) -> tuple:
     """初始化数据库，返回 engine 和 SessionLocal"""
     Path("./data").mkdir(exist_ok=True)
@@ -191,4 +220,47 @@ def init_db(database_url: str) -> tuple:
     )
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    # 确保 SQLite 中新增的列存在
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE users ADD COLUMN manager_id VARCHAR(36)"
+                )
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+        # 创建 join_requests 表（如果不存在）
+        try:
+            conn.execute(
+                __import__("sqlalchemy").text("SELECT 1 FROM join_requests LIMIT 1")
+            )
+        except Exception:
+            try:
+                conn.execute(
+                    __import__("sqlalchemy").text(
+                        """
+                        CREATE TABLE join_requests (
+                            id VARCHAR(36) PRIMARY KEY,
+                            enterprise_id VARCHAR(36) NOT NULL,
+                            user_id VARCHAR(36) NOT NULL,
+                            department_id VARCHAR(36),
+                            target_manager_id VARCHAR(36),
+                            message TEXT,
+                            status VARCHAR(20) DEFAULT 'pending',
+                            review_note TEXT,
+                            reviewed_by_id VARCHAR(36),
+                            reviewed_at DATETIME,
+                            created_at DATETIME
+                        )
+                        """
+                    )
+                )
+                conn.commit()
+            except Exception:
+                pass
+
     return engine, SessionLocal

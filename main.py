@@ -35,6 +35,8 @@ from models import (
     DocumentChunk,
     Enterprise,
     KnowledgeBase,
+    JoinRequest,
+    JoinRequestStatus,
     KBDocument,
     TokenUsage,
     User,
@@ -861,6 +863,581 @@ async def get_token_usage(
     ]
 
 
+# ============= 组织架构 & 人员管理 =============
+
+# ---------- 部门管理 ----------
+@app.get("/api/departments", tags=["组织"])
+async def list_departments(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """获取部门列表（扁平）"""
+    departments = (
+        db.query(Department).filter(Department.enterprise_id == user.enterprise_id).all()
+    )
+    return [
+        {
+            "id": d.id,
+            "parent_id": d.parent_id,
+            "name": d.name,
+            "description": d.description,
+            "manager_id": d.manager_id,
+            "manager_name": (
+                db.query(User).filter(User.id == d.manager_id).first().full_name
+                if d.manager_id
+                else None
+            ),
+            "member_count": len(d.users) if d.users else 0,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+        }
+        for d in departments
+    ]
+
+
+@app.get("/api/departments/tree", tags=["组织"])
+async def get_department_tree(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """获取组织架构树（包含成员）"""
+    departments = (
+        db.query(Department).filter(Department.enterprise_id == user.enterprise_id).all()
+    )
+    dept_map = {d.id: d for d in departments}
+
+    def build_node(dept: Department):
+        children = [c for c in departments if c.parent_id == dept.id]
+        members = (
+            db.query(User)
+            .filter(
+                User.department_id == dept.id,
+                User.enterprise_id == user.enterprise_id,
+            )
+            .all()
+        )
+        return {
+            "id": dept.id,
+            "parent_id": dept.parent_id,
+            "name": dept.name,
+            "description": dept.description,
+            "manager_id": dept.manager_id,
+            "manager_name": (
+                dept_map[dept.manager_id].full_name
+                if dept.manager_id and dept.manager_id in dept_map
+                else None
+            ),
+            "children": [build_node(c) for c in children],
+            "members": [
+                {
+                    "id": m.id,
+                    "username": m.username,
+                    "full_name": m.full_name,
+                    "email": m.email,
+                    "role": m.role.value,
+                    "manager_id": m.manager_id,
+                    "is_active": m.is_active,
+                }
+                for m in members
+            ],
+        }
+
+    roots = [d for d in departments if d.parent_id is None or d.parent_id not in dept_map]
+    if not roots:
+        return []
+    return [build_node(r) for r in roots]
+
+
+@app.post("/api/departments", tags=["组织"])
+async def create_department(
+    name: str = Form(...),
+    description: str = Form(None),
+    parent_id: str = Form(None),
+    manager_id: str = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """创建部门（仅企业管理员）"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    dept = Department(
+        id=str(uuid.uuid4()),
+        enterprise_id=user.enterprise_id,
+        parent_id=parent_id if parent_id and parent_id.strip() else None,
+        name=name,
+        description=description,
+        manager_id=manager_id if manager_id and manager_id.strip() else None,
+    )
+    db.add(dept)
+    db.commit()
+    return {"id": dept.id, "name": dept.name}
+
+
+@app.put("/api/departments/{dept_id}", tags=["组织"])
+async def update_department(
+    dept_id: str,
+    name: str = Form(None),
+    description: str = Form(None),
+    parent_id: str = Form(None),
+    manager_id: str = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """更新部门"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    dept = (
+        db.query(Department)
+        .filter(
+            Department.id == dept_id,
+            Department.enterprise_id == user.enterprise_id,
+        )
+        .first()
+    )
+    if not dept:
+        raise HTTPException(status_code=404, detail="部门不存在")
+
+    if name:
+        dept.name = name
+    if description is not None:
+        dept.description = description
+    if parent_id is not None:
+        dept.parent_id = parent_id.strip() if parent_id.strip() else None
+    if manager_id is not None:
+        dept.manager_id = manager_id.strip() if manager_id.strip() else None
+
+    db.commit()
+    return {"status": "success"}
+
+
+@app.delete("/api/departments/{dept_id}", tags=["组织"])
+async def delete_department(
+    dept_id: str,
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """删除部门（仅企业管理员）"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    dept = (
+        db.query(Department)
+        .filter(
+            Department.id == dept_id,
+            Department.enterprise_id == user.enterprise_id,
+        )
+        .first()
+    )
+    if not dept:
+        raise HTTPException(status_code=404, detail="部门不存在")
+
+    # 将子部门 parent_id 设为 null
+    children = db.query(Department).filter(Department.parent_id == dept_id).all()
+    for c in children:
+        c.parent_id = None
+
+    # 解除成员的部门归属
+    members = db.query(User).filter(User.department_id == dept_id).all()
+    for m in members:
+        m.department_id = None
+
+    db.delete(dept)
+    db.commit()
+    return {"status": "success"}
+
+
+# ---------- 人员管理（下属查询） ----------
+@app.get("/api/users/team", tags=["人员"])
+async def get_my_team(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """获取我的下属人员树（递归）"""
+    all_users = (
+        db.query(User).filter(User.enterprise_id == user.enterprise_id).all()
+    )
+    user_map = {u.id: u for u in all_users}
+
+    def build_subtree(user_id: str):
+        subordinates = [u for u in all_users if u.manager_id == user_id]
+        nodes = []
+        for sub in subordinates:
+            child = {
+                "id": sub.id,
+                "username": sub.username,
+                "full_name": sub.full_name,
+                "email": sub.email,
+                "role": sub.role.value,
+                "department_id": sub.department_id,
+                "department_name": (
+                    user_map[sub.department_id].department.name
+                    if sub.department_id and sub.department_id in user_map and sub.department
+                    else None
+                ),
+                "manager_id": sub.manager_id,
+                "is_active": sub.is_active,
+                "children": [],
+            }
+            # 递归查找下属的下属
+            grand_children = build_subtree(sub.id)
+            if grand_children:
+                child["children"] = grand_children
+            nodes.append(child)
+        return nodes
+
+    return build_subtree(user.id)
+
+
+@app.get("/api/users/details", tags=["人员"])
+async def get_user_details(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """获取当前用户详细信息（含部门、上级）"""
+    manager = (
+        db.query(User).filter(User.id == user.manager_id).first()
+        if user.manager_id
+        else None
+    )
+    department = (
+        db.query(Department).filter(Department.id == user.department_id).first()
+        if user.department_id
+        else None
+    )
+    subordinate_count = (
+        db.query(User).filter(User.manager_id == user.id).count()
+    )
+    return {
+        "id": user.id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "email": user.email,
+        "role": user.role.value,
+        "department_id": user.department_id,
+        "department_name": department.name if department else None,
+        "manager_id": user.manager_id,
+        "manager_name": manager.full_name if manager else None,
+        "subordinate_count": subordinate_count,
+        "is_admin": user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN],
+    }
+
+
+@app.put("/api/users/{target_id}/department", tags=["人员"])
+async def set_user_department(
+    target_id: str,
+    department_id: str = Form(None),
+    manager_id: str = Form(None),
+    role: str = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """分配用户部门/上级/角色（企业管理员或部门负责人）"""
+    target = (
+        db.query(User)
+        .filter(User.id == target_id, User.enterprise_id == user.enterprise_id)
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    is_admin = user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]
+    # 部门负责人可以调整本部门成员的上级，但不能改角色
+    is_dept_manager = False
+    target_dept = (
+        db.query(Department).filter(Department.id == target.department_id).first()
+        if target.department_id
+        else None
+    )
+    if target_dept and target_dept.manager_id == user.id:
+        is_dept_manager = True
+
+    if not is_admin and not is_dept_manager:
+        raise HTTPException(status_code=403, detail="无权操作")
+
+    if department_id is not None:
+        target.department_id = (
+            department_id.strip() if department_id.strip() else None
+        )
+    if manager_id is not None:
+        target.manager_id = manager_id.strip() if manager_id.strip() else None
+    if role and is_admin:
+        try:
+            target.role = UserRole(role)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="无效角色")
+
+    db.commit()
+    return {"status": "success"}
+
+
+# ---------- 申请加入部门 ----------
+@app.post("/api/join-requests", tags=["组织"])
+async def create_join_request(
+    department_id: str = Form(None),
+    target_manager_id: str = Form(None),
+    message: str = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """提交加入部门/团队申请"""
+    if not department_id and not target_manager_id:
+        raise HTTPException(status_code=400, detail="请选择部门或上级")
+
+    # 检查是否已有待处理申请
+    existing = (
+        db.query(JoinRequest)
+        .filter(
+            JoinRequest.user_id == user.id,
+            JoinRequest.status == JoinRequestStatus.PENDING,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="已有待处理申请")
+
+    dept = None
+    if department_id:
+        dept = (
+            db.query(Department)
+            .filter(
+                Department.id == department_id,
+                Department.enterprise_id == user.enterprise_id,
+            )
+            .first()
+        )
+        if not dept:
+            raise HTTPException(status_code=404, detail="部门不存在")
+
+    if target_manager_id:
+        target = (
+            db.query(User)
+            .filter(User.id == target_manager_id, User.enterprise_id == user.enterprise_id)
+            .first()
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="目标上级不存在")
+
+    request = JoinRequest(
+        id=str(uuid.uuid4()),
+        enterprise_id=user.enterprise_id,
+        user_id=user.id,
+        department_id=department_id if department_id else None,
+        target_manager_id=target_manager_id if target_manager_id else None,
+        message=message,
+    )
+    db.add(request)
+    db.commit()
+    return {"status": "success", "id": request.id}
+
+
+@app.get("/api/join-requests/mine", tags=["组织"])
+async def get_my_requests(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """查看我提交的申请"""
+    requests = (
+        db.query(JoinRequest).filter(JoinRequest.user_id == user.id).order_by(JoinRequest.created_at.desc()).all()
+    )
+    return [
+        {
+            "id": r.id,
+            "department_id": r.department_id,
+            "department_name": (
+                db.query(Department).filter(Department.id == r.department_id).first().name
+                if r.department_id
+                else None
+            ),
+            "target_manager_id": r.target_manager_id,
+            "target_manager_name": (
+                db.query(User).filter(User.id == r.target_manager_id).first().full_name
+                if r.target_manager_id
+                else None
+            ),
+            "message": r.message,
+            "status": r.status.value,
+            "review_note": r.review_note,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+        }
+        for r in requests
+    ]
+
+
+@app.get("/api/join-requests/pending", tags=["组织"])
+async def get_pending_requests(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """查看我需要审批的申请（部门负责人或企业管理员）"""
+    is_admin = user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]
+
+    # 获取我管理的部门
+    my_depts = (
+        db.query(Department)
+        .filter(Department.manager_id == user.id, Department.enterprise_id == user.enterprise_id)
+        .all()
+    )
+    my_dept_ids = [d.id for d in my_depts]
+
+    if is_admin:
+        requests = (
+            db.query(JoinRequest)
+            .filter(
+                JoinRequest.enterprise_id == user.enterprise_id,
+                JoinRequest.status == JoinRequestStatus.PENDING,
+            )
+            .order_by(JoinRequest.created_at.desc())
+            .all()
+        )
+    elif my_dept_ids:
+        requests = (
+            db.query(JoinRequest)
+            .filter(
+                JoinRequest.enterprise_id == user.enterprise_id,
+                JoinRequest.status == JoinRequestStatus.PENDING,
+                JoinRequest.department_id.in_(my_dept_ids) | (JoinRequest.target_manager_id == user.id),
+            )
+            .order_by(JoinRequest.created_at.desc())
+            .all()
+        )
+    else:
+        # 作为被指定的目标上级查看
+        requests = (
+            db.query(JoinRequest)
+            .filter(
+                JoinRequest.enterprise_id == user.enterprise_id,
+                JoinRequest.status == JoinRequestStatus.PENDING,
+                JoinRequest.target_manager_id == user.id,
+            )
+            .order_by(JoinRequest.created_at.desc())
+            .all()
+        )
+
+    return [
+        {
+            "id": r.id,
+            "user_id": r.user_id,
+            "user_name": (
+                db.query(User).filter(User.id == r.user_id).first().full_name
+                if r.user_id
+                else None
+            ),
+            "user_email": (
+                db.query(User).filter(User.id == r.user_id).first().email
+                if r.user_id
+                else None
+            ),
+            "department_id": r.department_id,
+            "department_name": (
+                db.query(Department).filter(Department.id == r.department_id).first().name
+                if r.department_id
+                else None
+            ),
+            "target_manager_id": r.target_manager_id,
+            "target_manager_name": (
+                db.query(User).filter(User.id == r.target_manager_id).first().full_name
+                if r.target_manager_id
+                else None
+            ),
+            "message": r.message,
+            "status": r.status.value,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in requests
+    ]
+
+
+@app.post("/api/join-requests/{request_id}/approve", tags=["组织"])
+async def approve_join_request(
+    request_id: str,
+    review_note: str = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """通过加入申请"""
+    request = (
+        db.query(JoinRequest)
+        .filter(JoinRequest.id == request_id, JoinRequest.enterprise_id == user.enterprise_id)
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="申请不存在")
+    if request.status != JoinRequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail="申请已处理")
+
+    # 权限检查
+    is_admin = user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]
+    target_dept = (
+        db.query(Department).filter(Department.id == request.department_id).first()
+        if request.department_id
+        else None
+    )
+    is_dept_manager = target_dept and target_dept.manager_id == user.id
+    is_target_manager = request.target_manager_id == user.id
+
+    if not is_admin and not is_dept_manager and not is_target_manager:
+        raise HTTPException(status_code=403, detail="无权审批")
+
+    # 审批通过，分配部门和上级
+    target_user = db.query(User).filter(User.id == request.user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    if request.department_id:
+        target_user.department_id = request.department_id
+    if request.target_manager_id:
+        target_user.manager_id = request.target_manager_id
+    elif target_dept and target_dept.manager_id:
+        target_user.manager_id = target_dept.manager_id
+
+    request.status = JoinRequestStatus.APPROVED
+    request.review_note = review_note
+    request.reviewed_by_id = user.id
+    request.reviewed_at = datetime.utcnow()
+    db.commit()
+    return {"status": "success"}
+
+
+@app.post("/api/join-requests/{request_id}/reject", tags=["组织"])
+async def reject_join_request(
+    request_id: str,
+    review_note: str = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """拒绝加入申请"""
+    request = (
+        db.query(JoinRequest)
+        .filter(JoinRequest.id == request_id, JoinRequest.enterprise_id == user.enterprise_id)
+        .first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="申请不存在")
+    if request.status != JoinRequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail="申请已处理")
+
+    is_admin = user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]
+    target_dept = (
+        db.query(Department).filter(Department.id == request.department_id).first()
+        if request.department_id
+        else None
+    )
+    is_dept_manager = target_dept and target_dept.manager_id == user.id
+    is_target_manager = request.target_manager_id == user.id
+
+    if not is_admin and not is_dept_manager and not is_target_manager:
+        raise HTTPException(status_code=403, detail="无权审批")
+
+    request.status = JoinRequestStatus.REJECTED
+    request.review_note = review_note
+    request.reviewed_by_id = user.id
+    request.reviewed_at = datetime.utcnow()
+    db.commit()
+    return {"status": "success"}
+
+
 # ============= 前端路由 =============
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -878,6 +1455,12 @@ async def login_page():
 @app.get("/register", response_class=HTMLResponse)
 async def register_page():
     with open("templates/register.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@app.get("/enterprise", response_class=HTMLResponse)
+async def enterprise_page():
+    with open("templates/enterprise.html", "r", encoding="utf-8") as f:
         return f.read()
 
 
