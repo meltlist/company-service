@@ -35,6 +35,7 @@ from models import (
     DocumentChunk,
     Enterprise,
     KnowledgeBase,
+    LLMProvider,
     JoinRequest,
     JoinRequestStatus,
     KBDocument,
@@ -110,17 +111,40 @@ async def get_current_user_dep(
 
 
 # ============= 辅助函数 =============
-def get_enterprise_llm(enterprise: Enterprise) -> LLMService:
-    """获取企业的 LLM 配置"""
-    provider = enterprise.llm_config.get("provider", "deepseek")
-    model = enterprise.llm_config.get("model", "deepseek-chat")
+def get_enterprise_llm(enterprise: Enterprise, db=None, provider_id: str = None) -> LLMService:
+    """获取企业的 LLM 配置。优先从 llm_providers 表读取，兼容旧版 llm_config / api_keys"""
+
+    # 1) 优先从 llm_providers 表读取
+    if db is not None:
+        q = db.query(LLMProvider).filter(
+            LLMProvider.enterprise_id == enterprise.id,
+            LLMProvider.is_active == True,
+        )
+        if provider_id:
+            q = q.filter(LLMProvider.id == provider_id)
+        else:
+            q = q.order_by(LLMProvider.is_default.desc(), LLMProvider.priority.desc())
+        provider = q.first()
+        if provider:
+            return (
+                LLMService(
+                    api_key=provider.api_key,
+                    provider=provider.provider_type,
+                    model=provider.default_model or None,
+                    base_url=provider.base_url or None,
+                ),
+                provider,
+            )
+
+    # 2) 兼容旧版：从 enterprise.llm_config / api_keys 读取
+    provider_name = enterprise.llm_config.get("provider", "deepseek") if enterprise.llm_config else "deepseek"
+    model = enterprise.llm_config.get("model", "deepseek-chat") if enterprise.llm_config else "deepseek-chat"
     api_keys = enterprise.api_keys or {}
-
-    api_key = api_keys.get(provider, "")
+    api_key = api_keys.get(provider_name, "")
     if not api_key:
-        raise HTTPException(status_code=400, detail=f"企业未配置 {provider} API Key")
+        raise HTTPException(status_code=400, detail=f"企业未配置 {provider_name} API Key")
 
-    return LLMService(api_key=api_key, provider=provider, model=model)
+    return LLMService(api_key=api_key, provider=provider_name, model=model), None
 
 
 def get_user_accessible_kb_ids(user: User, db: Session) -> list[str]:
@@ -678,7 +702,7 @@ async def chat(
         raise HTTPException(status_code=400, detail="企业不存在")
 
     try:
-        llm = get_enterprise_llm(enterprise)
+        llm, provider_obj = get_enterprise_llm(enterprise, db=db)
     except HTTPException as e:
         raise e
 
@@ -737,22 +761,740 @@ async def chat(
             "sources": [],
         }
 
-    # 记录 token 使用
+    # 记录 token 使用（带部门/上级/provider 维度，便于按组织聚合统计）
     usage = result.get("usage", {})
     if usage.get("total_tokens", 0) > 0:
         token_record = TokenUsage(
             id=str(uuid.uuid4()),
             user_id=user.id,
+            department_id=user.department_id,
+            manager_id=user.manager_id,
             model=result.get("model", llm.model),
+            provider=result.get("provider", llm.provider),
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             total_tokens=usage.get("total_tokens", 0),
-            cost=0,
         )
         db.add(token_record)
+
+        # 更新 provider 的累计 tokens
+        if provider_obj is not None:
+            provider_obj.total_tokens_used = (provider_obj.total_tokens_used or 0) + usage.get(
+                "total_tokens", 0
+            )
+            provider_obj.last_used_at = datetime.utcnow()
+
         db.commit()
 
     return result
+
+
+# ============= Provider 管理（企业管理员）=============
+@app.get("/api/admin/providers", tags=["Provider"])
+async def list_providers(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """列出企业已配置的所有 LLM Provider"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    providers = (
+        db.query(LLMProvider)
+        .filter(LLMProvider.enterprise_id == user.enterprise_id)
+        .order_by(LLMProvider.is_default.desc(), LLMProvider.priority.desc())
+        .all()
+    )
+    return [
+        {
+            "id": p.id,
+            "provider_type": p.provider_type,
+            "display_name": p.display_name,
+            "api_key_masked": p.api_key_masked,
+            "base_url": p.base_url,
+            "default_model": p.default_model,
+            "is_active": p.is_active,
+            "is_default": p.is_default,
+            "priority": p.priority,
+            "total_tokens_used": p.total_tokens_used or 0,
+            "last_used_at": p.last_used_at.isoformat() if p.last_used_at else None,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in providers
+    ]
+
+
+@app.post("/api/admin/providers", tags=["Provider"])
+async def create_provider(
+    provider_type: str = Form(...),
+    api_key: str = Form(...),
+    display_name: str = Form(None),
+    base_url: str = Form(None),
+    default_model: str = Form(None),
+    is_active: bool = Form(True),
+    is_default: bool = Form(False),
+    priority: int = Form(0),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """创建一个 LLM Provider 配置"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    # 如果新配置为默认，取消其他所有默认
+    if is_default:
+        db.query(LLMProvider).filter(LLMProvider.enterprise_id == user.enterprise_id).update(
+            {LLMProvider.is_default: False}
+        )
+
+    p = LLMProvider(
+        id=str(uuid.uuid4()),
+        enterprise_id=user.enterprise_id,
+        provider_type=provider_type,
+        display_name=display_name or provider_type.upper(),
+        api_key=api_key,
+        base_url=base_url,
+        default_model=default_model,
+        is_active=is_active,
+        is_default=is_default,
+        priority=priority,
+        created_by_id=user.id,
+    )
+    db.add(p)
+    db.commit()
+    return {"id": p.id, "display_name": p.display_name, "is_default": p.is_default}
+
+
+@app.put("/api/admin/providers/{provider_id}", tags=["Provider"])
+async def update_provider(
+    provider_id: str,
+    display_name: str = Form(None),
+    api_key: str = Form(None),
+    base_url: str = Form(None),
+    default_model: str = Form(None),
+    is_active: bool = Form(None),
+    is_default: bool = Form(None),
+    priority: int = Form(None),
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """更新 LLM Provider 配置"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    p = (
+        db.query(LLMProvider)
+        .filter(LLMProvider.id == provider_id, LLMProvider.enterprise_id == user.enterprise_id)
+        .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    if display_name is not None:
+        p.display_name = display_name
+    if api_key is not None:
+        p.api_key = api_key
+    if base_url is not None:
+        p.base_url = base_url
+    if default_model is not None:
+        p.default_model = default_model
+    if is_active is not None:
+        p.is_active = is_active
+    if priority is not None:
+        p.priority = priority
+    if is_default and is_default:
+        db.query(LLMProvider).filter(LLMProvider.enterprise_id == user.enterprise_id).update(
+            {LLMProvider.is_default: False}
+        )
+        p.is_default = True
+
+    db.commit()
+    return {"status": "success", "id": p.id, "is_default": p.is_default}
+
+
+@app.delete("/api/admin/providers/{provider_id}", tags=["Provider"])
+async def delete_provider(
+    provider_id: str,
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """删除 LLM Provider 配置"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    p = (
+        db.query(LLMProvider)
+        .filter(LLMProvider.id == provider_id, LLMProvider.enterprise_id == user.enterprise_id)
+        .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="Provider 不存在")
+
+    db.delete(p)
+    db.commit()
+    return {"status": "success"}
+
+
+@app.get("/api/providers/types", tags=["Provider"])
+async def get_supported_provider_types():
+    """返回所有受支持的 provider 类型，供前端下拉选使用"""
+    return [
+        {
+            "type": k,
+            "display_name": v["display_name"],
+            "api_base": v["api_base"],
+            "default_model": v["models"][0] if v["models"] else "",
+            "models": v["models"],
+        }
+        for k, v in {
+            "deepseek": {
+                "display_name": "DeepSeek",
+                "api_base": "https://api.deepseek.com",
+                "models": ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"],
+            },
+            "gemini": {
+                "display_name": "Google Gemini",
+                "api_base": "https://generativelanguage.googleapis.com",
+                "models": ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+            },
+            "openai": {
+                "display_name": "OpenAI",
+                "api_base": "https://api.openai.com/v1",
+                "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+            },
+            "anthropic": {
+                "display_name": "Anthropic Claude",
+                "api_base": "https://api.anthropic.com/v1",
+                "models": ["claude-4-5-sonnet-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+            },
+            "zhipu": {
+                "display_name": "智谱 GLM",
+                "api_base": "https://open.bigmodel.cn/api/paas/v4",
+                "models": ["glm-4-flash", "glm-4-air", "glm-4", "glm-4-plus"],
+            },
+            "moonshot": {
+                "display_name": "月之暗面 Moonshot",
+                "api_base": "https://api.moonshot.cn/v1",
+                "models": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+            },
+            "qwen": {
+                "display_name": "通义千问（阿里云 DashScope）",
+                "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "models": ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"],
+            },
+            "doubao": {
+                "display_name": "豆包（字节火山方舟）",
+                "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+                "models": ["doubao-pro-32k", "doubao-lite-32k", "doubao-pro-256k"],
+            },
+            "custom": {
+                "display_name": "自定义（OpenAI 兼容协议）",
+                "api_base": "",
+                "models": [],
+            },
+        }.items()
+    ]
+
+
+# ============= Token 用量聚合查询 ============
+@app.get("/api/admin/token-usage/summary", tags=["Token 用量"])
+async def get_token_usage_summary(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """企业管理员查看全企业各部门 / 各成员的 token 用量"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    from sqlalchemy import func
+
+    enterprise_user_ids = [
+        u[0] for u in db.query(User.id).filter(User.enterprise_id == user.enterprise_id).all()
+    ]
+
+    if not enterprise_user_ids:
+        return {"total_tokens": 0, "by_department": [], "by_user": [], "by_provider": []}
+
+    # 总 tokens
+    total = (
+        db.query(func.sum(TokenUsage.total_tokens))
+        .filter(TokenUsage.user_id.in_(enterprise_user_ids))
+        .scalar() or 0
+    )
+
+    # 按部门聚合
+    by_dept = (
+        db.query(
+            Department.id,
+            Department.name,
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .outerjoin(User, User.department_id == Department.id)
+        .join(TokenUsage, TokenUsage.user_id == User.id)
+        .filter(User.enterprise_id == user.enterprise_id)
+        .group_by(Department.id, Department.name)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .all()
+    )
+
+    # 未分配部门的成员
+    unassigned = (
+        db.query(
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .filter(
+            TokenUsage.user_id.in_(enterprise_user_ids),
+            TokenUsage.department_id.is_(None),
+        )
+        .first()
+    )
+
+    # 按 user
+    by_user = (
+        db.query(
+            User.id,
+            User.username,
+            User.full_name,
+            Department.name.label("dept_name"),
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .outerjoin(Department, Department.id == User.department_id)
+        .join(TokenUsage, TokenUsage.user_id == User.id)
+        .filter(User.enterprise_id == user.enterprise_id)
+        .group_by(User.id, User.username, User.full_name, Department.name)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .limit(50)
+        .all()
+    )
+
+    # 按 provider
+    by_provider = (
+        db.query(
+            TokenUsage.provider,
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .filter(TokenUsage.user_id.in_(enterprise_user_ids))
+        .group_by(TokenUsage.provider)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .all()
+    )
+
+    return {
+        "total_tokens": int(total),
+        "by_department": [
+            {
+                "department_id": d[0],
+                "department_name": d[1] or "未分配部门",
+                "total_tokens": int(d[2] or 0),
+                "requests": int(d[3] or 0),
+            }
+            for d in by_dept
+        ]
+        + (
+            [
+                {
+                    "department_id": None,
+                    "department_name": "未分配部门",
+                    "total_tokens": int(unassigned.total_tokens or 0),
+                    "requests": int(unassigned.requests or 0),
+                }
+            ]
+            if unassigned and (unassigned.total_tokens or unassigned.requests)
+            else []
+        ),
+        "by_user": [
+            {
+                "user_id": u[0],
+                "username": u[1],
+                "full_name": u[2],
+                "department_name": u[3] or "未分配部门",
+                "total_tokens": int(u[4] or 0),
+                "requests": int(u[5] or 0),
+            }
+            for u in by_user
+        ],
+        "by_provider": [
+            {
+                "provider": p[0] or "unknown",
+                "total_tokens": int(p[1] or 0),
+                "requests": int(p[2] or 0),
+            }
+            for p in by_provider
+        ],
+    }
+
+
+@app.get("/api/users/token-usage/team", tags=["Token 用量"])
+async def get_my_team_token_usage(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """直属上级/部门负责人查看下属 token 用量。
+
+    - 企业管理员：查看所有部门下属
+    - 部门负责人：查看本部门成员
+    - 普通用户：查看自己的直属下级
+    """
+    from sqlalchemy import func
+
+    subordinate_user_ids = []
+
+    # 1) 企业管理员：所有成员
+    if user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        subordinate_user_ids = [
+            u[0]
+            for u in db.query(User.id).filter(User.enterprise_id == user.enterprise_id).all()
+        ]
+        filter_by = "all"
+    # 2) 部门负责人：本部门成员
+    else:
+        dept_manager = (
+            db.query(Department)
+            .filter(
+                Department.manager_id == user.id,
+                Department.enterprise_id == user.enterprise_id,
+            )
+            .first()
+        )
+        if dept_manager:
+            subordinate_user_ids = [
+                u[0]
+                for u in db.query(User.id).filter(User.department_id == dept_manager.id).all()
+            ]
+            filter_by = "department"
+        else:
+            # 3) 普通用户：直属下级
+            subordinate_user_ids = [
+                u[0] for u in db.query(User.id).filter(User.manager_id == user.id).all()
+            ]
+            filter_by = "direct_subordinates"
+
+    # 计算下属直接人数
+    direct_subordinate_count = db.query(User).filter(User.manager_id == user.id).count()
+
+    if not subordinate_user_ids:
+        return {
+            "filter_by": filter_by,
+            "total_users": 0,
+            "total_tokens": 0,
+            "direct_subordinate_count": direct_subordinate_count,
+            "by_user": [],
+        }
+
+    total = (
+        db.query(func.sum(TokenUsage.total_tokens))
+        .filter(TokenUsage.user_id.in_(subordinate_user_ids))
+        .scalar() or 0
+    )
+
+    by_user = (
+        db.query(
+            User.id,
+            User.username,
+            User.full_name,
+            Department.name.label("dept_name"),
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .outerjoin(Department, Department.id == User.department_id)
+        .join(TokenUsage, TokenUsage.user_id == User.id)
+        .filter(User.id.in_(subordinate_user_ids))
+        .group_by(User.id, User.username, User.full_name, Department.name)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .all()
+    )
+
+    # 处理没有任何 token 使用记录但属于下属的用户（用于展示全员）
+    existing_user_ids = {u[0] for u in by_user}
+    no_usage = (
+        db.query(User.id, User.username, User.full_name, Department.name)
+        .outerjoin(Department, Department.id == User.department_id)
+        .filter(User.id.in_(subordinate_user_ids), User.id.notin_(existing_user_ids))
+        .all()
+    )
+
+    return {
+        "filter_by": filter_by,
+        "total_users": len(subordinate_user_ids),
+        "direct_subordinate_count": direct_subordinate_count,
+        "total_tokens": int(total or 0),
+        "by_user": [
+            {
+                "user_id": u[0],
+                "username": u[1],
+                "full_name": u[2],
+                "department_name": u[3] or "未分配部门",
+                "total_tokens": int(u[4] or 0),
+                "requests": int(u[5] or 0),
+            }
+            for u in by_user
+        ]
+        + [
+            {
+                "user_id": u[0],
+                "username": u[1],
+                "full_name": u[2],
+                "department_name": u[3] or "未分配部门",
+                "total_tokens": 0,
+                "requests": 0,
+            }
+            for u in no_usage
+        ],
+    }
+
+
+@app.get("/api/admin/token-usage/summary", tags=["Token 用量"])
+async def get_token_usage_summary(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """企业管理员查看全企业各部门 / 各成员的 token 用量"""
+    if user.role not in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="需要企业管理员权限")
+
+    from sqlalchemy import func
+
+    enterprise_user_ids = [
+        u[0] for u in db.query(User.id).filter(User.enterprise_id == user.enterprise_id).all()
+    ]
+
+    if not enterprise_user_ids:
+        return {"total_tokens": 0, "by_department": [], "by_user": [], "by_provider": []}
+
+    # 总 tokens
+    total = (
+        db.query(func.sum(TokenUsage.total_tokens))
+        .filter(TokenUsage.user_id.in_(enterprise_user_ids))
+        .scalar() or 0
+    )
+
+    # 按部门聚合
+    by_dept = (
+        db.query(
+            Department.id,
+            Department.name,
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .outerjoin(User, User.department_id == Department.id)
+        .join(TokenUsage, TokenUsage.user_id == User.id)
+        .filter(User.enterprise_id == user.enterprise_id)
+        .group_by(Department.id, Department.name)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .all()
+    )
+
+    # 未分配部门的成员
+    unassigned = (
+        db.query(
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .filter(
+            TokenUsage.user_id.in_(enterprise_user_ids),
+            TokenUsage.department_id.is_(None),
+        )
+        .first()
+    )
+
+    # 按 user
+    by_user = (
+        db.query(
+            User.id,
+            User.username,
+            User.full_name,
+            Department.name.label("dept_name"),
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .outerjoin(Department, Department.id == User.department_id)
+        .join(TokenUsage, TokenUsage.user_id == User.id)
+        .filter(User.enterprise_id == user.enterprise_id)
+        .group_by(User.id, User.username, User.full_name, Department.name)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .limit(50)
+        .all()
+    )
+
+    # 按 provider
+    by_provider = (
+        db.query(
+            TokenUsage.provider,
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .filter(TokenUsage.user_id.in_(enterprise_user_ids))
+        .group_by(TokenUsage.provider)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .all()
+    )
+
+    return {
+        "total_tokens": int(total),
+        "by_department": [
+            {
+                "department_id": d[0],
+                "department_name": d[1] or "未分配部门",
+                "total_tokens": int(d[2] or 0),
+                "requests": int(d[3] or 0),
+            }
+            for d in by_dept
+        ]
+        + (
+            [
+                {
+                    "department_id": None,
+                    "department_name": "未分配部门",
+                    "total_tokens": int(unassigned.total_tokens or 0),
+                    "requests": int(unassigned.requests or 0),
+                }
+            ]
+            if unassigned and (unassigned.total_tokens or unassigned.requests)
+            else []
+        ),
+        "by_user": [
+            {
+                "user_id": u[0],
+                "username": u[1],
+                "full_name": u[2],
+                "department_name": u[3] or "未分配部门",
+                "total_tokens": int(u[4] or 0),
+                "requests": int(u[5] or 0),
+            }
+            for u in by_user
+        ],
+        "by_provider": [
+            {
+                "provider": p[0] or "unknown",
+                "total_tokens": int(p[1] or 0),
+                "requests": int(p[2] or 0),
+            }
+            for p in by_provider
+        ],
+    }
+
+
+@app.get("/api/users/token-usage/team", tags=["Token 用量"])
+async def get_my_team_token_usage(
+    user: User = Depends(get_current_user_dep),
+    db: Session = Depends(get_db),
+):
+    """直属上级/部门负责人查看下属 token 用量。
+
+    - 企业管理员：查看所有部门下属
+    - 部门负责人：查看本部门成员
+    - 普通用户：查看自己的直属下级
+    """
+    from sqlalchemy import func
+
+    subordinate_user_ids = []
+
+    # 1) 企业管理员：所有成员
+    if user.role in [UserRole.ENTERPRISE_ADMIN, UserRole.SUPER_ADMIN]:
+        subordinate_user_ids = [
+            u[0]
+            for u in db.query(User.id).filter(User.enterprise_id == user.enterprise_id).all()
+        ]
+        filter_by = "all"
+    # 2) 部门负责人：本部门成员
+    else:
+        dept_manager = (
+            db.query(Department)
+            .filter(
+                Department.manager_id == user.id,
+                Department.enterprise_id == user.enterprise_id,
+            )
+            .first()
+        )
+        if dept_manager:
+            subordinate_user_ids = [
+                u[0]
+                for u in db.query(User.id).filter(User.department_id == dept_manager.id).all()
+            ]
+            filter_by = "department"
+        else:
+            # 3) 普通用户：直属下级
+            subordinate_user_ids = [
+                u[0] for u in db.query(User.id).filter(User.manager_id == user.id).all()
+            ]
+            filter_by = "direct_subordinates"
+
+    # 计算下属直接人数
+    direct_subordinate_count = db.query(User).filter(User.manager_id == user.id).count()
+
+    if not subordinate_user_ids:
+        return {
+            "filter_by": filter_by,
+            "total_users": 0,
+            "total_tokens": 0,
+            "direct_subordinate_count": direct_subordinate_count,
+            "by_user": [],
+        }
+
+    total = (
+        db.query(func.sum(TokenUsage.total_tokens))
+        .filter(TokenUsage.user_id.in_(subordinate_user_ids))
+        .scalar() or 0
+    )
+
+    by_user = (
+        db.query(
+            User.id,
+            User.username,
+            User.full_name,
+            Department.name.label("dept_name"),
+            func.sum(TokenUsage.total_tokens).label("total_tokens"),
+            func.count(TokenUsage.id).label("requests"),
+        )
+        .outerjoin(Department, Department.id == User.department_id)
+        .join(TokenUsage, TokenUsage.user_id == User.id)
+        .filter(User.id.in_(subordinate_user_ids))
+        .group_by(User.id, User.username, User.full_name, Department.name)
+        .order_by(func.sum(TokenUsage.total_tokens).desc())
+        .all()
+    )
+
+    # 处理没有任何 token 使用记录但属于下属的用户（用于展示全员）
+    existing_user_ids = {u[0] for u in by_user}
+    no_usage = (
+        db.query(User.id, User.username, User.full_name, Department.name)
+        .outerjoin(Department, Department.id == User.department_id)
+        .filter(User.id.in_(subordinate_user_ids), User.id.notin_(existing_user_ids))
+        .all()
+    )
+
+    return {
+        "filter_by": filter_by,
+        "total_users": len(subordinate_user_ids),
+        "direct_subordinate_count": direct_subordinate_count,
+        "total_tokens": int(total or 0),
+        "by_user": [
+            {
+                "user_id": u[0],
+                "username": u[1],
+                "full_name": u[2],
+                "department_name": u[3] or "未分配部门",
+                "total_tokens": int(u[4] or 0),
+                "requests": int(u[5] or 0),
+            }
+            for u in by_user
+        ]
+        + [
+            {
+                "user_id": u[0],
+                "username": u[1],
+                "full_name": u[2],
+                "department_name": u[3] or "未分配部门",
+                "total_tokens": 0,
+                "requests": 0,
+            }
+            for u in no_usage
+        ],
+    }
 
 
 # ============= 企业管理路由 =============

@@ -35,6 +35,8 @@
             <button onclick="switchTab('org')" class="tab-btn active px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">🌐 组织架构</button>
             <button onclick="switchTab('join')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">📝 加入申请</button>
             <button onclick="switchTab('team')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">👥 我的团队</button>
+            <button onclick="switchTab('providers')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">🔑 API Key 管理</button>
+            <button onclick="switchTab('usage')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">📊 Token 用量</button>
             <button onclick="switchTab('settings')" class="tab-btn px-5 py-2.5 text-sm font-medium rounded-lg bg-white text-slate-700 hover:bg-blue-50 transition">⚙️ 企业设置</button>
         </div>
 
@@ -42,6 +44,8 @@
         <div id="tab-org" class="tab-content fade-in"></div>
         <div id="tab-join" class="tab-content fade-in hidden"></div>
         <div id="tab-team" class="tab-content fade-in hidden"></div>
+        <div id="tab-providers" class="tab-content fade-in hidden"></div>
+        <div id="tab-usage" class="tab-content fade-in hidden"></div>
         <div id="tab-settings" class="tab-content fade-in hidden"></div>
     </div>
 
@@ -136,7 +140,7 @@
 
         // ---------- Tab 切换 ----------
         function switchTab(tab) {
-            ['org', 'join', 'team', 'settings'].forEach(t => {
+            ['org', 'join', 'team', 'providers', 'usage', 'settings'].forEach(t => {
                 document.getElementById('tab-' + t).classList.add('hidden');
             });
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -146,6 +150,8 @@
             if (tab === 'org') renderOrg();
             if (tab === 'join') renderJoin();
             if (tab === 'team') renderTeam();
+            if (tab === 'providers') renderProviders();
+            if (tab === 'usage') renderTokenUsage();
             if (tab === 'settings') renderSettings();
         }
 
@@ -549,6 +555,356 @@
             let count = node.children ? node.children.length : 0;
             if (node.children) node.children.forEach(c => count += countTeamTotal(c));
             return count;
+        }
+
+        // ---------- API Key 管理 Tab ----------
+        async function renderProviders() {
+            const container = document.getElementById('tab-providers');
+            let providers;
+            let providerTypes;
+            try {
+                // 先获取可用类型列表（所有人都能看）
+                providerTypes = await api('/api/providers/types');
+                // 企业管理员才能操作/查看列表
+                providers = await api('/api/admin/providers');
+            } catch (e) {
+                providerTypes = providerTypes || [];
+                providers = null;
+            }
+
+            // 如果没有管理员权限，提示即可
+            if (!providers) {
+                container.innerHTML = '<div class="bg-white rounded-xl shadow-sm p-6"><div class="text-sm text-slate-500">🔒 企业管理员配置 API Key，使用本企业的 API 额度</div></div>';
+                return;
+            }
+
+            let html = '';
+
+            // 添加按钮
+            html += '<div class="mb-4 flex justify-between items-center">';
+            html += '<h2 class="text-lg font-semibold text-slate-800">🔑 API Key 管理</h2>';
+            html += '<button onclick="openProviderModal()" class="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition">+ 添加 API Key</button>';
+            html += '</div>';
+
+            if (!providers || providers.length === 0) {
+                html += '<div class="bg-white rounded-xl shadow-sm p-6"><div class="text-sm text-slate-500">暂无 API Key 配置，点击右上角按钮添加</div></div>';
+            } else {
+                html += '<div class="grid gap-4">';
+                providers.forEach(p => {
+                    html += '<div class="bg-white rounded-xl shadow-sm p-5 border-l-4 ' + (p.is_default ? 'border-blue-500' : 'border-slate-200') + '">';
+                    html += '<div class="flex justify-between items-start mb-3">';
+                    html += '<div>';
+                    html += '<div class="font-semibold text-slate-800">' + escape(p.display_name) + '</div>';
+                    html += '<div class="text-xs text-slate-500 mt-1">类型: <span class="font-mono">' + escape(p.provider_type) + '</span></div>';
+                    html += '<div class="text-xs text-slate-500 mt-1">Key: <span class="font-mono">' + escape(p.api_key_masked) + '</span></div>';
+                    if (p.base_url) html += '<div class="text-xs text-slate-500 mt-1">Base URL: <span class="font-mono">' + escape(p.base_url) + '</span></div>';
+                    if (p.default_model) html += '<div class="text-xs text-slate-500 mt-1">模型: <span class="font-mono">' + escape(p.default_model) + '</span></div>';
+                    html += '</div>';
+                    html += '<div class="flex items-center gap-2">';
+                    if (p.is_default) html += '<span class="badge bg-blue-100 text-blue-700">默认</span>';
+                    if (p.is_active) html += '<span class="badge bg-green-100 text-green-700">启用</span>';
+                    else html += '<span class="badge bg-slate-100 text-slate-600">已停用</span>';
+                    html += '</div></div>';
+                    // tokens 统计
+                    html += '<div class="text-xs text-slate-500 mb-3 border-t pt-3 mt-3">';
+                    html += '累计 Tokens: <span class="font-semibold text-slate-700">' + p.total_tokens_used + '</span>';
+                    if (p.last_used_at) html += ' &nbsp;|&nbsp; 最后使用: ' + escape(p.last_used_at);
+                    html += '</div>';
+                    // 操作按钮
+                    html += '<div class="flex gap-2 justify-end">';
+                    html += '<button onclick="openProviderModal(\'' + p.id + '\', \'' + escape(p.provider_type) + '\', \'' + escape(p.display_name) + '\', \'' + escape(p.default_model || '') + '\', \'' + escape(p.base_url || '') + '\', ' + p.is_active + ', ' + p.is_default + ', ' + p.priority + ')" class="px-3 py-1.5 text-xs bg-slate-100 text-slate-700 rounded hover:bg-slate-200 transition">编辑</button>';
+                    if (!p.is_default) html += '<button onclick="setDefaultProvider(\'' + p.id + '\')" class="px-3 py-1.5 text-xs bg-blue-50 text-blue-700 rounded hover:bg-blue-100 transition">设为默认</button>';
+                    html += '<button onclick="deleteProvider(\'' + p.id + '\')" class="px-3 py-1.5 text-xs bg-red-50 text-red-700 rounded hover:bg-red-100 transition">删除</button>';
+                    html += '</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 支持的 Provider 类型提示
+            html += '<div class="mt-6 bg-white rounded-xl shadow-sm p-5">';
+            html += '<h3 class="text-sm font-semibold text-slate-700 mb-3">支持的 API Key 来源</h3>';
+            html += '<div class="grid grid-cols-1 md:grid-cols-2 gap-2">';
+            providerTypes.forEach(t => {
+                html += '<div class="bg-slate-50 rounded-lg p-3 text-xs">';
+                html += '<div class="font-medium text-slate-700">' + escape(t.display_name) + '</div>';
+                if (t.api_base) html += '<div class="font-mono text-slate-500 mt-1 text-[11px]">' + escape(t.api_base) + '</div>';
+                html += '</div>';
+            });
+            html += '</div></div>';
+
+            container.innerHTML = html;
+        }
+
+        // 打开/编辑 Provider 模态
+        let editingProviderId = null;
+        function openProviderModal(id, provider_type, display_name, default_model, base_url, is_active, is_default, priority) {
+            editingProviderId = id || null;
+            const modal = document.getElementById('modal');
+            const isEdit = !!id;
+
+            let html = '<div class="p-6">';
+            html += '<h3 class="text-lg font-semibold text-slate-800 mb-4">' + (isEdit ? '编辑 API Key' : '添加 API Key') + '</h3>';
+            html += '<form id="providerForm" onsubmit="saveProvider(event)" class="space-y-4">';
+
+            // Provider 类型下拉
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">API Key 来源 *</label>';
+            html += '<select id="pProviderType" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" ' + (isEdit ? 'disabled' : '') + ' required>';
+            html += '</select></div>';
+
+            // Display Name
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">显示名称 *</label>';
+            html += '<input type="text" id="pDisplayName" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" required placeholder="例如：公司主账号"/></div>';
+
+            // API Key
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">API Key ' + (isEdit ? '(留空则不修改)' : '*') + '</label>';
+            html += '<input type="password" id="pApiKey" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" ' + (isEdit ? '' : 'required') + ' placeholder="sk-..."/></div>';
+
+            // Base URL
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">Base URL (可选)</label>';
+            html += '<input type="text" id="pBaseUrl" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" placeholder="自定义部署地址"/></div>';
+
+            // Default Model
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">默认模型 (可选)</label>';
+            html += '<input type="text" id="pDefaultModel" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" placeholder="例如 deepseek-chat"/></div>';
+
+            // Priority
+            html += '<div><label class="block text-sm font-medium text-slate-700 mb-1">优先级（数字越大越优先）</label>';
+            html += '<input type="number" id="pPriority" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" value="0"/></div>';
+
+            // Flags
+            html += '<div class="flex gap-4">';
+            html += '<label class="flex items-center gap-2 text-sm"><input type="checkbox" id="pIsActive" checked/> 启用</label>';
+            html += '<label class="flex items-center gap-2 text-sm"><input type="checkbox" id="pIsDefault"/> 设为默认</label>';
+            html += '</div>';
+
+            html += '<div class="flex justify-end gap-2 pt-4">';
+            html += '<button type="button" onclick="closeModal()" class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">取消</button>';
+            html += '<button type="submit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">保存</button>';
+            html += '</div>';
+            html += '</form></div>';
+
+            const content = document.getElementById('modalContent');
+            content.innerHTML = html;
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+
+            // 填充下拉
+            api('/api/providers/types').then(types => {
+                const select = document.getElementById('pProviderType');
+                select.innerHTML = types.map(t => '<option value="' + t.type + '">' + t.display_name + '</option>').join('');
+                // 编辑时填充
+                if (isEdit) {
+                    select.value = provider_type;
+                    document.getElementById('pDisplayName').value = display_name || '';
+                    document.getElementById('pBaseUrl').value = base_url || '';
+                    document.getElementById('pDefaultModel').value = default_model || '';
+                    document.getElementById('pPriority').value = priority || 0;
+                    document.getElementById('pIsActive').checked = !!is_active;
+                    document.getElementById('pIsDefault').checked = !!is_default;
+                }
+            });
+        }
+
+        async function saveProvider(event) {
+            event.preventDefault();
+            const providerType = document.getElementById('pProviderType').value;
+            const displayName = document.getElementById('pDisplayName').value;
+            const apiKey = document.getElementById('pApiKey').value;
+            const baseUrl = document.getElementById('pBaseUrl').value;
+            const defaultModel = document.getElementById('pDefaultModel').value;
+            const priority = parseInt(document.getElementById('pPriority').value) || 0;
+            const isActive = document.getElementById('pIsActive').checked;
+            const isDefault = document.getElementById('pIsDefault').checked;
+
+            const fd = new FormData();
+            fd.append('provider_type', providerType);
+            fd.append('display_name', displayName);
+            if (apiKey) fd.append('api_key', apiKey);
+            if (baseUrl) fd.append('base_url', baseUrl);
+            if (defaultModel) fd.append('default_model', defaultModel);
+            fd.append('priority', priority);
+            fd.append('is_active', isActive);
+            fd.append('is_default', isDefault);
+
+            try {
+                if (editingProviderId) {
+                    // 更新
+                    const updateFd = new FormData();
+                    updateFd.append('display_name', displayName);
+                    if (apiKey) updateFd.append('api_key', apiKey);
+                    if (baseUrl) updateFd.append('base_url', baseUrl);
+                    if (defaultModel) updateFd.append('default_model', defaultModel);
+                    updateFd.append('priority', priority);
+                    updateFd.append('is_active', isActive);
+                    updateFd.append('is_default', isDefault);
+                    await api('/api/admin/providers/' + editingProviderId, {
+                        method: 'PUT',
+                        body: updateFd,
+                    });
+                } else {
+                    await api('/api/admin/providers', { method: 'POST', body: fd });
+                }
+                closeModal();
+                renderProviders();
+            } catch (e) {
+                alert('保存失败: ' + e.message);
+            }
+        }
+
+        async function setDefaultProvider(id) {
+            try {
+                const fd = new FormData();
+                fd.append('is_default', true);
+                fd.append('display_name', '');
+                fd.append('priority', 0);
+                fd.append('is_active', true);
+                fd.append('default_model', '');
+                // 直接调用 PUT，用最小字段集
+                await api('/api/admin/providers/' + id, {
+                    method: 'PUT',
+                    body: fd,
+                });
+                renderProviders();
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            }
+        }
+
+        async function deleteProvider(id) {
+            if (!confirm('确认删除该 API Key 配置？')) return;
+            try {
+                await api('/api/admin/providers/' + id, { method: 'DELETE' });
+                renderProviders();
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        }
+
+        // ---------- Token 用量 Tab ----------
+        async function renderTokenUsage() {
+            const container = document.getElementById('tab-usage');
+            // 先尝试管理员视图，失败则使用普通用户视图
+            let summary = null;
+            let teamUsage = null;
+
+            try {
+                summary = await api('/api/admin/token-usage/summary');
+            } catch (e) {
+                summary = null;
+            }
+
+            try {
+                teamUsage = await api('/api/users/token-usage/team');
+            } catch (e) {
+                teamUsage = null;
+            }
+
+            if (!summary && !teamUsage) {
+                container.innerHTML = '<div class="bg-white rounded-xl shadow-sm p-6"><div class="text-sm text-slate-500">暂无数据</div></div>';
+                return;
+            }
+
+            let html = '';
+
+            // 管理员视图：全企业聚合
+            if (summary) {
+                html += '<div class="bg-white rounded-xl shadow-sm p-6 mb-4">';
+                html += '<h2 class="text-lg font-semibold text-slate-800 mb-4">📊 全企业 Token 用量</h2>';
+                html += '<div class="text-3xl font-bold text-blue-600 mb-2">' + formatNumber(summary.total_tokens) + ' <span class="text-lg text-slate-500 font-normal">tokens</span></div>';
+
+                // 按 Provider 聚合
+                if (summary.by_provider && summary.by_provider.length) {
+                    html += '<h3 class="text-sm font-semibold text-slate-700 mt-6 mb-3">按 API 来源统计</h3>';
+                    html += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">';
+                    summary.by_provider.forEach(p => {
+                        const pct = Math.round((p.total_tokens / summary.total_tokens) * 100);
+                        html += '<div class="bg-slate-50 rounded-lg p-4">';
+                        html += '<div class="flex justify-between items-center mb-2">';
+                        html += '<span class="font-medium text-slate-700 text-sm">' + escape(p.provider) + '</span>';
+                        html += '<span class="text-sm text-slate-500">' + formatNumber(p.total_tokens) + ' tokens</span>';
+                        html += '</div>';
+                        html += '<div class="w-full bg-slate-200 rounded-full h-2"><div class="bg-blue-500 h-2 rounded-full" style="width:' + pct + '%"></div></div>';
+                        html += '<div class="text-xs text-slate-500 mt-1">' + p.requests + ' 次请求</div>';
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                }
+
+                // 按部门聚合
+                if (summary.by_department && summary.by_department.length) {
+                    html += '<h3 class="text-sm font-semibold text-slate-700 mt-6 mb-3">按部门统计</h3>';
+                    html += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">';
+                    summary.by_department.forEach(d => {
+                        const pct = summary.total_tokens > 0 ? Math.round((d.total_tokens / summary.total_tokens) * 100) : 0;
+                        html += '<div class="bg-slate-50 rounded-lg p-4">';
+                        html += '<div class="flex justify-between items-center mb-2">';
+                        html += '<span class="font-medium text-slate-700 text-sm">' + escape(d.department_name) + '</span>';
+                        html += '<span class="text-sm text-slate-500">' + formatNumber(d.total_tokens) + ' tokens</span>';
+                        html += '</div>';
+                        html += '<div class="w-full bg-slate-200 rounded-full h-2"><div class="bg-green-500 h-2 rounded-full" style="width:' + pct + '%"></div></div>';
+                        html += '<div class="text-xs text-slate-500 mt-1">' + d.requests + ' 次请求</div>';
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                }
+
+                // 按用户聚合
+                if (summary.by_user && summary.by_user.length) {
+                    html += '<h3 class="text-sm font-semibold text-slate-700 mt-6 mb-3">成员 Top 使用量</h3>';
+                    html += '<div class="overflow-x-auto"><table class="min-w-full text-sm">';
+                    html += '<thead><tr class="text-left text-slate-500 border-b"><th class="py-2 px-3">成员</th><th class="py-2 px-3">部门</th><th class="py-2 px-3 text-right">Tokens</th><th class="py-2 px-3 text-right">请求数</th></tr></thead>';
+                    html += '<tbody>';
+                    summary.by_user.slice(0, 20).forEach(u => {
+                        html += '<tr class="border-b border-slate-100">';
+                        html += '<td class="py-2 px-3 font-medium text-slate-700">' + escape(u.full_name || u.username) + '</td>';
+                        html += '<td class="py-2 px-3 text-slate-500">' + escape(u.department_name) + '</td>';
+                        html += '<td class="py-2 px-3 text-right font-mono text-slate-700">' + formatNumber(u.total_tokens) + '</td>';
+                        html += '<td class="py-2 px-3 text-right text-slate-500">' + u.requests + '</td>';
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table></div>';
+                }
+
+                html += '</div>';
+            }
+
+            // 团队/直属下级视图
+            if (teamUsage && teamUsage.by_user && teamUsage.by_user.length) {
+                const filterLabels = { all: '全企业', department: '本部门', direct_subordinates: '直属下级' };
+                const label = filterLabels[teamUsage.filter_by] || '下属';
+                html += '<div class="bg-white rounded-xl shadow-sm p-6">';
+                html += '<h2 class="text-lg font-semibold text-slate-800 mb-2">👥 我的团队 Token 用量</h2>';
+                html += '<div class="text-sm text-slate-500 mb-4">当前统计范围：<span class="font-medium text-slate-700">' + label + '</span> &nbsp;|&nbsp; 覆盖 ' + teamUsage.total_users + ' 人，其中直接下属 ' + teamUsage.direct_subordinate_count + ' 人</div>';
+
+                html += '<div class="text-2xl font-bold text-green-600 mb-4">' + formatNumber(teamUsage.total_tokens) + ' <span class="text-base text-slate-500 font-normal">tokens</span></div>';
+
+                html += '<div class="overflow-x-auto"><table class="min-w-full text-sm">';
+                html += '<thead><tr class="text-left text-slate-500 border-b"><th class="py-2 px-3">成员</th><th class="py-2 px-3">部门</th><th class="py-2 px-3 text-right">Tokens</th><th class="py-2 px-3 text-right">请求数</th></tr></thead>';
+                html += '<tbody>';
+                teamUsage.by_user.forEach(u => {
+                    html += '<tr class="border-b border-slate-100">';
+                    html += '<td class="py-2 px-3 font-medium text-slate-700">' + escape(u.full_name || u.username) + '</td>';
+                    html += '<td class="py-2 px-3 text-slate-500">' + escape(u.department_name) + '</td>';
+                    html += '<td class="py-2 px-3 text-right font-mono text-slate-700">' + formatNumber(u.total_tokens) + '</td>';
+                    html += '<td class="py-2 px-3 text-right text-slate-500">' + u.requests + '</td>';
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+                html += '</div>';
+            } else if (teamUsage && (!teamUsage.by_user || teamUsage.by_user.length === 0)) {
+                html += '<div class="bg-white rounded-xl shadow-sm p-6">';
+                html += '<h2 class="text-lg font-semibold text-slate-800 mb-2">👥 我的团队 Token 用量</h2>';
+                html += '<div class="text-sm text-slate-500 mt-2">暂无下属或下属尚未产生 Token 用量</div>';
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        function formatNumber(n) {
+            if (n == null) return '0';
+            return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
         }
 
         // ---------- 企业设置 Tab ----------

@@ -17,34 +17,77 @@ from config import settings
 
 
 class LLMConfig:
-    """LLM 配置"""
+    """LLM 配置：主流 9 大提供商 + 自定义"""
 
     PROVIDERS = {
         "deepseek": {
             "api_base": "https://api.deepseek.com",
-            "models": ["deepseek-chat", "deepseek-coder"],
-            "supports_stream": True,
+            "models": ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "DeepSeek",
         },
         "gemini": {
             "api_base": "https://generativelanguage.googleapis.com",
-            "models": ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
-            "supports_stream": True,
+            "models": ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+            "auth_style": "query_key",
+            "api_type": "gemini",
+            "display_name": "Google Gemini",
         },
         "openai": {
             "api_base": "https://api.openai.com/v1",
-            "models": ["gpt-4o-mini", "gpt-4o"],
-            "supports_stream": True,
+            "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "OpenAI",
+        },
+        "anthropic": {
+            "api_base": "https://api.anthropic.com/v1",
+            "models": ["claude-4-5-sonnet-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+            "auth_style": "anthropic",
+            "api_type": "openai_compatible",
+            "display_name": "Anthropic Claude",
         },
         "zhipu": {
             "api_base": "https://open.bigmodel.cn/api/paas/v4",
-            "models": ["glm-4", "glm-4-flash"],
-            "supports_stream": True,
+            "models": ["glm-4-flash", "glm-4-air", "glm-4", "glm-4-plus"],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "智谱 GLM",
+        },
+        "moonshot": {
+            "api_base": "https://api.moonshot.cn/v1",
+            "models": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "月之暗面 Moonshot",
+        },
+        "qwen": {
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "models": ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "通义千问",
+        },
+        "doubao": {
+            "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+            "models": ["doubao-pro-32k", "doubao-lite-32k", "doubao-pro-256k"],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "豆包（火山方舟）",
+        },
+        "custom": {
+            "api_base": "",
+            "models": [],
+            "auth_style": "bearer",
+            "api_type": "openai_compatible",
+            "display_name": "自定义（OpenAI 兼容协议）",
         },
     }
 
     @classmethod
     def get_provider_config(cls, provider: str) -> dict:
-        return cls.PROVIDERS.get(provider, {})
+        return cls.PROVIDERS.get(provider, cls.PROVIDERS["custom"])
 
 
 class TokenCounter:
@@ -68,18 +111,21 @@ class TokenCounter:
 
 
 class LLMService:
-    """LLM 服务"""
+    """LLM 服务：统一调度 DeepSeek / Gemini / OpenAI / Anthropic / 智谱 / 月之暗面 / 通义千问 / 豆包 / 自定义 OpenAI 协议"""
 
-    def __init__(self, api_key: str, provider: str = "deepseek", model: str = None):
+    def __init__(self, api_key: str, provider: str = "deepseek", model: str = None, base_url: str = None):
         self.api_key = api_key
         self.provider = provider
         self.provider_config = LLMConfig.get_provider_config(provider)
-        self.model = model or self._get_default_model()
-        self.api_base = self.provider_config.get("api_base", settings.DEFAULT_API_BASE)
+        self.model = model or (
+            self.provider_config.get("models", ["deepseek-chat"])[0]
+            if self.provider_config.get("models")
+            else "deepseek-chat"
+        )
+        self.api_base = base_url or self.provider_config.get("api_base", "https://api.deepseek.com")
+        self.auth_style = self.provider_config.get("auth_style", "bearer")
+        self.api_type = self.provider_config.get("api_type", "openai_compatible")
         self.token_counter = TokenCounter()
-
-    def _get_default_model(self) -> str:
-        return self.provider_config.get("models", ["gpt-4o-mini"])[0]
 
     def chat(
         self,
@@ -88,24 +134,36 @@ class LLMService:
         max_tokens: int = 2048,
         stream: bool = False,
     ) -> dict:
-        """发送对话请求"""
+        """发送对话请求，根据 provider 类型选择不同的请求协议"""
+
+        if self.api_type == "gemini":
+            return self._chat_gemini(messages, temperature, max_tokens)
+        # Anthropic 使用自己的 messages 接口但兼容 openai 协议大部分
+        # 统一走 openai_compatible，只有 auth header 不同
+        return self._chat_openai(messages, temperature, max_tokens, stream)
+
+    def _chat_openai(
+        self,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+    ) -> dict:
+        """OpenAI 兼容协议（bearer / anthropic header）"""
         url = f"{self.api_base}/chat/completions"
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        # Gemini 特殊处理
-        if self.provider == "gemini":
-            return self._gemini_chat(messages, temperature, max_tokens, stream)
+        headers = {"Content-Type": "application/json"}
+        if self.auth_style == "bearer":
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        elif self.auth_style == "anthropic":
+            headers["x-api-key"] = self.api_key
+            headers["anthropic-version"] = "2023-06-01"
 
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": stream,
         }
 
         with httpx.Client(timeout=120.0) as client:
@@ -113,41 +171,39 @@ class LLMService:
             response.raise_for_status()
             result = response.json()
 
-        # 计算 token
-        prompt_tokens = result.get("usage", {}).get("prompt_tokens", 0)
-        completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
-        total_tokens = result.get("usage", {}).get("total_tokens", 0)
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        usage = result.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", 0)
 
         # 如果 API 没返回，使用估算
         if total_tokens == 0:
             total_tokens = self._estimate_tokens(messages)
 
         return {
-            "content": result["choices"][0]["message"]["content"],
+            "content": content,
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
             },
             "model": self.model,
+            "provider": self.provider,
         }
 
-    def _gemini_chat(
+    def _chat_gemini(
         self,
         messages: list[dict],
         temperature: float,
         max_tokens: int,
-        stream: bool,
     ) -> dict:
-        """Gemini 特殊处理"""
-        # Gemini 使用不同的 API 格式
+        """Gemini 协议。请求体是 generateContent 格式，API Key 通过 query 传。"""
         contents = []
         for msg in messages:
             role = "model" if msg["role"] == "assistant" else "user"
-            contents.append({
-                "role": role,
-                "parts": [{"text": msg["content"]}],
-            })
+            parts = [{"text": part} for part in [msg.get("content", "")]]
+            contents.append({"role": role, "parts": parts})
 
         url = f"{self.api_base}/v1beta/models/{self.model}:generateContent"
         params = {"key": self.api_key}
@@ -165,29 +221,44 @@ class LLMService:
             response.raise_for_status()
             result = response.json()
 
-        content = result["candidates"][0]["content"]["parts"][0]["text"]
+        # 解析 Gemini 返回
+        content = ""
+        candidates = result.get("candidates", [])
+        if candidates and "content" in candidates[0]:
+            parts = candidates[0]["content"].get("parts", [])
+            content = "".join([p.get("text", "") for p in parts])
 
-        # Gemini token 估算
-        prompt_text = "\n".join([m["content"] for m in messages])
-        prompt_tokens = self._estimate_tokens(prompt_text)
-        completion_tokens = self._estimate_tokens(content)
+        # 使用估算方式统计 token（Gemini API 部分版本会返回 usageMetadata）
+        prompt_tokens = 0
+        completion_tokens = 0
+        usage_metadata = result.get("usageMetadata")
+        if usage_metadata:
+            prompt_tokens = usage_metadata.get("promptTokenCount", 0)
+            completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
+            total_tokens = usage_metadata.get("totalTokenCount", prompt_tokens + completion_tokens)
+        else:
+            prompt_text = "\n".join([m.get("content", "") for m in messages])
+            prompt_tokens = self._estimate_tokens(prompt_text)
+            completion_tokens = self._estimate_tokens(content)
+            total_tokens = prompt_tokens + completion_tokens
 
         return {
             "content": content,
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
+                "total_tokens": total_tokens,
             },
             "model": self.model,
+            "provider": self.provider,
         }
 
     def _estimate_tokens(self, messages: list[dict] | str) -> int:
         """估算 token 数量"""
         if isinstance(messages, str):
-            return self.token_counter.count(messages) * 2  # 估算增长
+            return max(1, self.token_counter.count(messages) * 2)
         text = "\n".join([m.get("content", "") for m in messages])
-        return self.token_counter.count(text)
+        return max(1, self.token_counter.count(text))
 
 
 class RAGService:
