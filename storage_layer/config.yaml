@@ -1,0 +1,5 @@
+database:
+  path: "./data/jarvis_phase1.db"
+  compression:
+    retention_days: 7       # 超过7天的事件压缩
+    cron: "0 3 * * *"       # 每天凌晨3点执行压缩
